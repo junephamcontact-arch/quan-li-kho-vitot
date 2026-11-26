@@ -244,12 +244,35 @@ function splitWarehouses(items) {
 function buildSlips(tables) {
   const slips = [];
   const push = (s) => { s.id = `${s.type}:${s.code}:${s.rowRefs.length ? s.rowRefs[0].row : slips.length}`; slips.push(s); };
+  /* Dòng gõ TAY thẳng trong Sheet (cột Mã phiếu để trống) vẫn là dữ liệu thật của kho — các tab phiếu
+     là nguồn sự thật duy nhất nên dòng tay cũng phải tính vào sổ kho/tổng hợp như phiếu app tạo.
+     Chỉ nhận dòng có SẢN PHẨM + SỐ LƯỢNG (đúng cột của từng tab); dòng trống/thiếu số lượng thì bỏ qua.
+     Mỗi dòng tay = 1 phiếu riêng, mã hiển thị dạng NH-TAY-<số dòng> để phân biệt với phiếu app tạo. */
+  const MANUAL_PREFIX = { in: 'NH-TAY', out: 'XH-TAY', check: 'KK-TAY', process: 'CB-TAY', recon: 'DS-TAY' };
+  const manualOk = (type, r, line) => {
+    if (!line) return false;
+    const has = c => String(c == null ? '' : c).trim() !== '';
+    if (type === 'in' || type === 'out') return (has(r[5]) || has(r[6])) && has(r[7]);
+    if (type === 'check') return (has(r[4]) || has(r[3])) && has(r[6]);
+    if (type === 'process') return (has(r[4]) || has(r[3]) || has(r[7])) && (has(r[5]) || has(r[8]));
+    if (type === 'recon') return has(r[4]);
+    return false;
+  };
   const group = (rows, type, fn) => {
     const map = new Map();
     rows.slice(1).forEach((r, i) => {
       const rowNum = i + 2;
       const code = String(r[0] || '').trim();
-      if (!code) return;
+      if (!code) {
+        const line = fn(r, false);
+        if (!manualOk(type, r, line)) return;
+        const s = fn(r, true);
+        s.type = type; s.code = `${MANUAL_PREFIX[type]}-${rowNum}`; s.manual = true;
+        s.lines = [line]; s.rowRefs = [{ tab: TABS[type], row: rowNum }];
+        s.writeStatus = 'written'; s.writtenAt = ''; s.writeError = '';
+        push(s);
+        return;
+      }
       if (!map.has(code)) { const s = fn(r, true); s.type = type; s.code = code; s.lines = []; s.rowRefs = []; s.writeStatus = 'written'; s.writtenAt = ''; s.writeError = ''; map.set(code, s); push(s); }
       const s = map.get(code);
       const line = fn(r, false);
@@ -289,7 +312,10 @@ function slipTimeKey(s) {
   if (m) return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6] || '00'}`;
   m = raw.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2}))?/);
   if (m) return `${m[3]}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')} ${String(m[4] || 0).padStart(2, '0')}:${m[5] || '00'}:00`;
-  return (s.dateKey || '') + ' 00:00:00';
+  if (s.dateKey) return s.dateKey + ' 00:00:00';
+  // Không có ngày (dòng gõ tay trong Sheet thiếu cột ngày): xếp CUỐI trong replay;
+  // sort ổn định giữ nguyên thứ tự dòng trong Sheet cho các phiếu cùng nhóm này.
+  return '9999-12-31 23:59:59';
 }
 /* Chuẩn hoá mã: phiếu chế biến ghi mã SKU ở cột mã nguyên liệu/thành phẩm, phiếu nhập/xuất ghi Mã mẫu
    → quy về 1 mã chung (Mã mẫu nếu có) qua danh mục POS để cộng đúng cùng 1 sản phẩm. */
@@ -348,7 +374,7 @@ function computeWarehouseStock() {
       e.totalIn = round3(e.totalIn + qty);
       e.fromInbound = true;
       const tk = slipTimeKey(s);
-      if (tk >= (e.lastInKey || '')) { e.lastInKey = tk; e.lastInAt = s.createdAt || ''; }
+      if (s.createdAt && tk >= (e.lastInKey || '')) { e.lastInKey = tk; e.lastInAt = s.createdAt; }
     }
     else if (s.type === 'out') for (const l of s.lines || []) {
       const qty = Number(l.qty) || 0;
@@ -401,6 +427,42 @@ function warehouseSummary(entries) {
   let totalQty = 0, productCount = 0;
   for (const e of list) if (e.stock > 0) { totalQty += e.stock; productCount++; }
   return { totalQty: Math.round(totalQty * 1000) / 1000, productCount };
+}
+
+/* Đối chiếu kho cửa hàng (sổ kho) ↔ kho POS chính (tab TỒN_KHO_POS) — CHỈ ADMIN mới được xem.
+   Khớp sản phẩm theo mã đã chuẩn hoá + TÊN (đúng định danh của dataset kho); sản phẩm chỉ có ở
+   1 phía vẫn liệt kê (phía còn lại tính 0). Chênh lệch = tồn kho cửa hàng − tồn POS chính. */
+function posComparison(entries, whFilter) {
+  const canon = buildCanon();
+  const round3 = n => Math.round(n * 1000) / 1000;
+  const groups = new Map(); // nhóm POS theo mã + tên + kho POS
+  for (const i of state.inventory.items) {
+    const c = canon.get(i.sampleCode || i.sku) || i.sampleCode || i.sku || '';
+    if (!c) continue;
+    const label = productLabel(i, null);
+    const k = c + '\u0002' + normProdName(label) + '\u0001' + (i.warehouse || '');
+    let g = groups.get(k);
+    if (!g) { g = { code: c, name: dispProdName(label), warehouse: i.warehouse || '', posStock: 0 }; groups.set(k, g); }
+    g.posStock = round3(g.posStock + (Number(i.stock) || 0));
+  }
+  const rows = [];
+  const matched = new Set();
+  for (const e of entries) {
+    let pos = 0;
+    for (const [k, g] of groups) {
+      if (g.code !== e.code || normProdName(g.name) !== normProdName(e.name)) continue;
+      if (e.warehouse && g.warehouse && !g.warehouse.includes(e.warehouse) && !e.warehouse.includes(g.warehouse)) continue;
+      pos = round3(pos + g.posStock); matched.add(k);
+    }
+    rows.push({ code: e.code, name: e.name, warehouse: e.warehouse, unit: e.unit || '', storeStock: e.stock, posStock: pos, diff: round3(e.stock - pos) });
+  }
+  for (const [k, g] of groups) {
+    if (matched.has(k)) continue;
+    if (whFilter && !(g.warehouse || '').includes(whFilter)) continue;
+    rows.push({ code: g.code, name: g.name, warehouse: g.warehouse, unit: '', storeStock: 0, posStock: g.posStock, diff: round3(-g.posStock) });
+  }
+  rows.sort((a, b) => (Math.abs(b.diff) - Math.abs(a.diff)) || a.name.localeCompare(b.name, 'vi'));
+  return { rows, mismatchCount: rows.filter(r => r.diff !== 0).length };
 }
 
 async function readAllTables(sheetId) {
@@ -793,7 +855,9 @@ async function api(req, res, url) {
   if (p === '/api/lists') return send(res, 200, { lists: state.lists });
 
   if (p === '/api/products') {
-    const blind = url.searchParams.get('blind') === '1';
+    // NHÂN VIÊN (không phải ADMIN) tuyệt đối không nhận số liệu POS: ép bản rút gọn chỉ gồm
+    // tên + mã + phân loại + kho + danh mục (đủ để chọn sản phẩm), KHÔNG có tồn/bán POS.
+    const blind = url.searchParams.get('blind') === '1' || !isAdmin(user);
     const items = state.inventory.items.map(i => blind
       ? { key: i.key, name: i.name, variant: i.variant, sampleCode: i.sampleCode, warehouse: i.warehouse, category: i.category }
       : { key: i.key, sku: i.sku, name: i.name, variant: i.variant, sampleCode: i.sampleCode, barcode: i.barcode, category: i.category, warehouse: i.warehouse, supplier: i.supplier, sellable: i.sellable, stock: i.stock });
@@ -848,7 +912,10 @@ async function api(req, res, url) {
     items.sort((a, b) => a.name.localeCompare(b.name, 'vi'));
     const page = Math.max(1, parseInt(url.searchParams.get('page') || '1'));
     const size = 100;
-    return send(res, 200, { counts, summary, total: items.length, page, items: items.slice((page - 1) * size, page * size), syncedAt: state.inventory.syncedAt, source: 'warehouse-ledger' });
+    const out = { counts, summary, total: items.length, page, items: items.slice((page - 1) * size, page * size), syncedAt: state.inventory.syncedAt, source: 'warehouse-ledger' };
+    // Đối chiếu với kho POS chính: CHỈ ADMIN — nhân viên không nhận được bất kỳ số POS nào qua API này.
+    if (isAdmin(user)) out.posCompare = posComparison(inWh, wh);
+    return send(res, 200, out);
   }
 
   if (p === '/api/dashboard') {
