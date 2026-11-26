@@ -291,9 +291,9 @@ function slipTimeKey(s) {
   if (m) return `${m[3]}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')} ${String(m[4] || 0).padStart(2, '0')}:${m[5] || '00'}:00`;
   return (s.dateKey || '') + ' 00:00:00';
 }
-function computeWarehouseStock() {
-  // Chuẩn hoá mã: phiếu chế biến ghi mã SKU ở cột mã nguyên liệu/thành phẩm, phiếu nhập/xuất ghi Mã mẫu
-  // → quy về 1 mã chung (Mã mẫu nếu có) qua danh mục POS để cộng đúng cùng 1 sản phẩm.
+/* Chuẩn hoá mã: phiếu chế biến ghi mã SKU ở cột mã nguyên liệu/thành phẩm, phiếu nhập/xuất ghi Mã mẫu
+   → quy về 1 mã chung (Mã mẫu nếu có) qua danh mục POS để cộng đúng cùng 1 sản phẩm. */
+function buildCanon() {
   const canon = new Map();
   for (const it of state.inventory.items) {
     const c = it.sampleCode || it.sku;
@@ -301,6 +301,10 @@ function computeWarehouseStock() {
     if (it.sku) canon.set(it.sku, c);
     if (it.sampleCode) canon.set(it.sampleCode, c);
   }
+  return canon;
+}
+function computeWarehouseStock() {
+  const canon = buildCanon();
   const canonCode = code => canon.get(code) || code || '';
   const round3 = n => Math.round(n * 1000) / 1000;
   const map = new Map();
@@ -309,7 +313,18 @@ function computeWarehouseStock() {
     const pk = c || ('name:' + String(name || '').trim().toLowerCase());
     const k = (wh || '') + '\u0001' + pk;
     let e = map.get(k);
-    if (!e) { e = { warehouse: wh || '', code: c, name: String(name || '').trim(), unit: unit || '', stock: 0 }; map.set(k, e); }
+    if (!e) {
+      e = {
+        warehouse: wh || '', code: c, name: String(name || '').trim(), unit: unit || '', stock: 0,
+        // Số liệu TỔNG HỢP theo mã (gộp mọi phiếu): totalIn = tổng SL đã nhập qua mọi phiếu Nhập;
+        // totalOut = tổng SL xuất kho + nguyên liệu đưa vào chế biến; processIn = thành phẩm chế biến nhập lại kho;
+        // checkAdj = tổng điều chỉnh do kiểm kho (ĐẶT tồn = số đếm). Hằng đẳng thức: stock = totalIn − totalOut + processIn + checkAdj.
+        totalIn: 0, totalOut: 0, processIn: 0, checkAdj: 0,
+        fromInbound: false, // true khi sản phẩm từng xuất hiện trong 1 phiếu Nhập đã ghi — chỉ những mã này mới thuộc "sản phẩm của kho"
+        lastInAt: '', lastInKey: ''
+      };
+      map.set(k, e);
+    }
     if (name) e.name = String(name).trim();
     if (unit) e.unit = unit;
     return e;
@@ -319,15 +334,63 @@ function computeWarehouseStock() {
   slips.sort((a, b) => { const ka = slipTimeKey(a), kb = slipTimeKey(b); return ka < kb ? -1 : ka > kb ? 1 : 0; });
   for (const s of slips) {
     const wh = s.warehouse || '';
-    if (s.type === 'in') for (const l of s.lines || []) { const e = entry(wh, l.sampleCode, l.name, l.unit); e.stock = round3(e.stock + (Number(l.qty) || 0)); }
-    else if (s.type === 'out') for (const l of s.lines || []) { const e = entry(wh, l.sampleCode, l.name, l.unit); e.stock = round3(e.stock - (Number(l.qty) || 0)); }
-    else if (s.type === 'check') for (const l of s.lines || []) { const e = entry(wh, l.sampleCode, l.name, ''); e.stock = Number(l.counted) || 0; }
+    if (s.type === 'in') for (const l of s.lines || []) {
+      const qty = Number(l.qty) || 0;
+      const e = entry(wh, l.sampleCode, l.name, l.unit);
+      e.stock = round3(e.stock + qty);
+      e.totalIn = round3(e.totalIn + qty);
+      e.fromInbound = true;
+      const tk = slipTimeKey(s);
+      if (tk >= (e.lastInKey || '')) { e.lastInKey = tk; e.lastInAt = s.createdAt || ''; }
+    }
+    else if (s.type === 'out') for (const l of s.lines || []) {
+      const qty = Number(l.qty) || 0;
+      const e = entry(wh, l.sampleCode, l.name, l.unit);
+      e.stock = round3(e.stock - qty);
+      e.totalOut = round3(e.totalOut + qty);
+    }
+    else if (s.type === 'check') for (const l of s.lines || []) {
+      const e = entry(wh, l.sampleCode, l.name, '');
+      const counted = Number(l.counted) || 0;
+      e.checkAdj = round3(e.checkAdj + (counted - e.stock)); // kiểm kho ĐẶT tồn → phần chênh so với sổ ngay trước phiếu kiểm là điều chỉnh
+      e.stock = counted;
+    }
     else if (s.type === 'process') for (const l of s.lines || []) {
-      const inp = entry(wh, l.sampleCode, l.name, ''); inp.stock = round3(inp.stock - (Number(l.inputQty) || 0));
-      if (l.finishedSku || l.finishedName) { const fin = entry(wh, l.finishedSku, l.finishedName, ''); fin.stock = round3(fin.stock + (Number(l.posQty) || 0)); }
+      const iq = Number(l.inputQty) || 0;
+      const inp = entry(wh, l.sampleCode, l.name, '');
+      inp.stock = round3(inp.stock - iq);
+      inp.totalOut = round3(inp.totalOut + iq); // nguyên liệu rời kho đi chế biến cũng là 1 dạng "đã xuất khỏi kho"
+      if (l.finishedSku || l.finishedName) {
+        const pq = Number(l.posQty) || 0;
+        const fin = entry(wh, l.finishedSku, l.finishedName, '');
+        fin.stock = round3(fin.stock + pq);
+        fin.processIn = round3(fin.processIn + pq);
+      }
     }
   }
   return [...map.values()];
+}
+
+/* "Sản phẩm của kho": chỉ các mã TỪNG XUẤT HIỆN trong phiếu Nhập đã ghi mới thuộc danh sách kho độc lập.
+   Cả 5 chức năng (Tra cứu / Nhập tham khảo / Xuất / Kiểm / Chế biến) đều làm việc trên dataset này,
+   trừ picker Nhập (cổng mã mới, vẫn lấy danh mục POS) và picker thành phẩm Chế biến khi là mã mới. */
+function warehouseEntries() {
+  return computeWarehouseStock().filter(e => e.fromInbound);
+}
+/* Tồn sổ kho hiện tại của 1 mã tại 1 kho (dùng làm "tồn hệ thống" dự phòng cho phiếu kiểm khi không tra được POS) */
+function ledgerBalanceOf(warehouse, code) {
+  const c = buildCanon().get(code) || code || '';
+  const e = computeWarehouseStock().find(x => x.warehouse === (warehouse || '') && x.code === c);
+  return e ? e.stock : 0;
+}
+
+/* Tóm tắt sổ kho cho chip "Tồn kho" + đầu màn Tra cứu: tổng số lượng THỰC TẾ còn trong kho
+   = tổng các số dư DƯƠNG (sản phẩm âm kho không trừ ngược vào tổng), kèm số mặt hàng đang có tồn. */
+function warehouseSummary(entries) {
+  const list = entries || warehouseEntries();
+  let totalQty = 0, productCount = 0;
+  for (const e of list) if (e.stock > 0) { totalQty += e.stock; productCount++; }
+  return { totalQty: Math.round(totalQty * 1000) / 1000, productCount };
 }
 
 async function readAllTables(sheetId) {
@@ -618,7 +681,10 @@ async function createSlip(user, body) {
   } else if (type === 'check') {
     for (const l of linesIn) {
       const item = itemOf(l);
-      const systemStock = item ? item.stock : 0;
+      // "Tồn hệ thống" đối chiếu: ưu tiên tồn POS khi tra được theo key; picker kho không tra được POS
+      // thì lấy tồn SỔ KHO hiện tại của mã đó (thay vì 0 như trước — 0 làm sai lệch cột chênh lệch trên Sheet).
+      const lineCode = item ? item.sampleCode : (l.sampleCode || '');
+      const systemStock = item ? item.stock : ledgerBalanceOf(slip.warehouse, lineCode);
       const counted = Number(l.counted) || 0;
       const variance = counted - systemStock;
       const matchStatus = variance === 0 ? 'Khớp' : (variance > 0 ? 'Thừa' : 'Thiếu');
@@ -633,13 +699,15 @@ async function createSlip(user, body) {
       const loss = inputQty - usable - discard;
       // Thành phẩm: ghi vào 3 cột G/H/I của tab CHẾ_BIẾN_SƠ_CHẾ (trước đây để trống)
       const finItem = l.finishedKey ? state.inventory.items.find(i => i.key === l.finishedKey) : null;
-      const finishedSku = finItem ? (finItem.sku || finItem.sampleCode || '') : '';
-      const finishedName = finItem ? productLabel({ name: finItem.name, variant: finItem.variant }, null) : '';
+      // Thành phẩm: tra POS theo finishedKey nếu có; nếu chọn từ danh sách kho / mã mới không có key POS
+      // thì nhận thẳng finishedSku/finishedName do client gửi (trước đây để trống → thành phẩm "biến mất" khỏi sổ).
+      const finishedSku = finItem ? (finItem.sku || finItem.sampleCode || '') : String(l.finishedSku || '').trim();
+      const finishedName = finItem ? productLabel({ name: finItem.name, variant: finItem.variant }, null) : String(l.finishedName || '').trim();
       const posQty = Number(l.posQty) || 0;
       const reason = String(l.reason || '').trim();
       // Cột P "Lý do hủy / Ghi chú" chứa cả lý do hủy + ghi chú của phiếu
       const noteCell = [reason ? 'Lý do hủy: ' + reason : '', slip.note].filter(Boolean).join(' • ');
-      const line = { key: l.key || '', name: l.name || (item ? item.name : ''), variant: l.variant || (item ? item.variant : ''), sampleCode: item ? item.sampleCode : '', unit: l.unit || '', inputQty, usable, discard, loss, usablePct: inputQty ? +(usable / inputQty * 100).toFixed(1) : 0, discardPct: inputQty ? +(discard / inputQty * 100).toFixed(1) : 0, lossPct: inputQty ? +(loss / inputQty * 100).toFixed(1) : 0, finishedSku, finishedName, posQty, reason };
+      const line = { key: l.key || '', name: l.name || (item ? item.name : ''), variant: l.variant || (item ? item.variant : ''), sampleCode: item ? item.sampleCode : (l.sampleCode || ''), unit: l.unit || '', inputQty, usable, discard, loss, usablePct: inputQty ? +(usable / inputQty * 100).toFixed(1) : 0, discardPct: inputQty ? +(discard / inputQty * 100).toFixed(1) : 0, lossPct: inputQty ? +(loss / inputQty * 100).toFixed(1) : 0, finishedSku, finishedName, posQty, reason };
       slip.lines.push(line);
       rows.push([code, slip.warehouse, dt, item ? (item.sku || item.sampleCode) : (l.sampleCode || ''), productLabel(line, item), inputQty, finishedSku, finishedName, posQty ? posQty : '', usable, discard, loss, line.usablePct, line.discardPct, line.lossPct, noteCell, user.name, '']);
     }
@@ -699,7 +767,8 @@ async function api(req, res, url) {
       user: publicUser(user), lists: state.lists, roles: state.roles.map(r => ({ id: r.id, name: r.name, system: r.system })),
       defaultWarehouse: state.defaultWarehouse, exportCategories: exportCategories(),
       staffNames: state.staff.filter(s => s.active).map(s => s.name),
-      inventoryMeta: { count: state.inventory.items.length, syncedAt: state.inventory.syncedAt, posUpdatedAt: state.inventory.posUpdatedAt }
+      inventoryMeta: { count: state.inventory.items.length, syncedAt: state.inventory.syncedAt, posUpdatedAt: state.inventory.posUpdatedAt },
+      warehouseStock: warehouseSummary()
     };
     if (isAdmin(user)) out.sheet = { id: currentSheetId(), connected: true, mode: WRITABLE ? 'readwrite' : 'readonly', saEmail: creds ? creds.client_email : '' };
     return send(res, 200, out);
@@ -715,6 +784,30 @@ async function api(req, res, url) {
     return send(res, 200, { items });
   }
 
+  /* "Sản phẩm của kho" — dataset TỔNG HỢP từ các phiếu NHẬP đã ghi (gộp theo mã, 1 dòng/mã/kho):
+     nguồn cho Tra cứu + picker Xuất / Kiểm / Chế biến (nguyên liệu) + thông tin tham khảo ở Nhập.
+     blind=1: chỉ trả tên + mã (kiểm kho mù — không lộ bất kỳ con số nào). */
+  if (p === '/api/warehouse-products') {
+    const blind = url.searchParams.get('blind') === '1';
+    const wh = url.searchParams.get('warehouse') || '';
+    const q = (url.searchParams.get('q') || '').toLowerCase();
+    let items = warehouseEntries();
+    if (wh) items = items.filter(i => (i.warehouse || '').includes(wh));
+    if (q) items = items.filter(i => (i.name + ' ' + i.code).toLowerCase().includes(q));
+    items.sort((a, b) => a.name.localeCompare(b.name, 'vi'));
+    const out = items.map(e => {
+      const pos = state.inventory.items.find(i => (i.sampleCode || i.sku) === e.code && i.warehouse === e.warehouse)
+        || state.inventory.items.find(i => (i.sampleCode || i.sku) === e.code);
+      const base = {
+        key: 'wh:' + e.warehouse + '\u0001' + (e.code || e.name),
+        warehouse: e.warehouse, code: e.code, name: e.name, unit: e.unit,
+        category: pos ? pos.category : '', posKey: pos ? pos.key : ''
+      };
+      return blind ? base : { ...base, totalIn: e.totalIn, totalOut: e.totalOut, processIn: e.processIn, checkAdj: e.checkAdj, balance: e.stock, lastInAt: e.lastInAt };
+    });
+    return send(res, 200, { items: out });
+  }
+
   if (p === '/api/inventory') {
     // Tra cứu tồn kho theo SỔ KHO ĐỘC LẬP (tính từ phiếu đã ghi Sheet) — KHÔNG dùng tồn POS.
     // Danh mục POS (TỒN_KHO_POS) chỉ còn phục vụ picker chọn sản phẩm qua /api/products.
@@ -722,9 +815,10 @@ async function api(req, res, url) {
     const wh = url.searchParams.get('warehouse') || '';
     const q = (url.searchParams.get('q') || '').toLowerCase();
     const filter = url.searchParams.get('filter') || 'all';
-    let items = computeWarehouseStock();
+    let items = warehouseEntries(); // chỉ mã đã từng nhập mới thuộc danh sách kho (mô hình kho độc lập)
     const inWh = wh ? items.filter(i => (i.warehouse || '').includes(wh)) : items;
     const counts = { all: inWh.length, available: inWh.filter(i => i.stock > 0).length, out: inWh.filter(i => i.stock <= 0).length };
+    const summary = warehouseSummary(inWh);
     items = inWh;
     if (filter === 'available') items = items.filter(i => i.stock > 0);
     if (filter === 'out') items = items.filter(i => i.stock <= 0);
@@ -732,7 +826,7 @@ async function api(req, res, url) {
     items.sort((a, b) => a.name.localeCompare(b.name, 'vi'));
     const page = Math.max(1, parseInt(url.searchParams.get('page') || '1'));
     const size = 100;
-    return send(res, 200, { counts, total: items.length, page, items: items.slice((page - 1) * size, page * size), syncedAt: state.inventory.syncedAt, source: 'warehouse-ledger' });
+    return send(res, 200, { counts, summary, total: items.length, page, items: items.slice((page - 1) * size, page * size), syncedAt: state.inventory.syncedAt, source: 'warehouse-ledger' });
   }
 
   if (p === '/api/dashboard') {
@@ -1167,7 +1261,7 @@ async function api(req, res, url) {
   }
   if (p === '/api/sheet-sync' && method === 'POST') {
     if (!needAdmin(req, res)) return;
-    try { await reloadCache(); return send(res, 200, { ok: true, count: state.inventory.items.length, syncedAt: state.inventory.syncedAt, posUpdatedAt: state.inventory.posUpdatedAt }); }
+    try { await reloadCache(); return send(res, 200, { ok: true, count: state.inventory.items.length, syncedAt: state.inventory.syncedAt, posUpdatedAt: state.inventory.posUpdatedAt, warehouseStock: warehouseSummary() }); }
     catch (e) { return send(res, 400, { error: e.message }); }
   }
 
