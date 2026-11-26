@@ -1,0 +1,30 @@
+# Render Blueprint — Quản lí kho Vitot (standalone v24.261126)
+# Cách dùng: đẩy thư mục này lên GitHub → Render → New → Blueprint → chọn repo → Render tự tạo Web Service theo file này.
+# Sau khi tạo service: vào Environment và điền các biến có sync: false (bí mật / tuỳ môi trường), rồi gắn tên miền
+# kho.xelientinh247.com theo hướng dẫn DNS Cloudflare trong HUONG-DAN-TRIEN-KHAI.md.
+services:
+  - type: web
+    name: quan-li-kho-vitot
+    runtime: node
+    plan: free # gói Free sẽ ngủ sau ~15 phút không dùng; muốn chạy 24/7 đổi thành "starter"
+    buildCommand: "echo ok" # không cần build: app chỉ dùng module có sẵn của Node, không npm install
+    startCommand: "node server.js"
+    envVars:
+      # Chìa khoá tài khoản dịch vụ Google (toàn bộ nội dung file JSON) — BẮT BUỘC để app GHI được vào Sheet.
+      # Điền trong Render Dashboard → Environment (không commit lên Git).
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      # Cách thay thế nếu không dùng biến trên: tải file JSON lên máy chủ và đặt đường dẫn.
+      # - key: GOOGLE_APPLICATION_CREDENTIALS
+      #   value: /etc/secrets/sa.json
+      # ID của Google Sheet "QUẢN LÍ KHO HÀNG VITOT" (bỏ trống = dùng ID mặc định trong code;
+      # ADMIN cũng đổi được trong app: Cài đặt → Kết nối Google Sheet).
+      - key: SHEET_ID
+        sync: false
+      # Địa chỉ hosting mà tên miền riêng phải trỏ CNAME về — trên Render là <service>.onrender.com
+      # (ví dụ quan-li-kho-vitot.onrender.com). Dùng cho mục Cài đặt → Kết nối tên miền (kiểm tra DNS).
+      - key: HOST_TARGET
+        sync: false
+      # Lối thoát khẩn cấp của khoá mạng công ty: đặt "1" để TẮT khoá IP bất kể cài đặt trong app.
+      - key: DISABLE_IP_LOCK
+        value: "0"
