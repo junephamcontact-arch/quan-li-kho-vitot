@@ -263,7 +263,9 @@ html[data-theme="dark"] .cal-tag.evt{background:#173626;color:#5fd68a}
 .slip-acc.open .slip-acc-body{display:block}
 
 /* ---------- Lịch: form thêm/sửa sự kiện INLINE trong panel ngày ---------- */
-.cal-ev-form{margin-top:14px;border-top:1px dashed var(--border);padding-top:12px;text-align:left}
+.cal-ev-form{margin-top:14px;border-top:1px dashed var(--border);padding-top:12px;text-align:left;animation:evdrop .18s ease}
+@keyframes evdrop{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+#syncBtn.syncing{opacity:.6;pointer-events:none}
 
 /* ---------- Toast ---------- */
 #toasts{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:120;display:flex;flex-direction:column;gap:8px;align-items:center}

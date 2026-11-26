@@ -1,5 +1,5 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v29.261126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v30.261126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -73,7 +73,30 @@ function toast(msg, err) {
 }
 /* Thông báo khi 1 đợt đồng bộ tồn kho kết thúc — dùng chung cho mọi nút đồng bộ trong app, mỗi đợt báo đúng 1 lần */
 function notifySyncDone(r) {
-  return alertOk('Đồng bộ hoàn tất', `Đã đồng bộ ${r.count} sản phẩm từ tab TỒN_KHO_POS.\nHoàn tất lúc: ${r.syncedAt || ''}`);
+  const slipsLine = r.slips !== undefined && r.slips !== null ? `\nĐã đọc ${r.slips} phiếu từ các tab phiếu.` : '';
+  return alertOk('Đồng bộ hoàn tất', `Đã đồng bộ ${r.count} sản phẩm từ tab TỒN_KHO_POS.${slipsLine}\nHoàn tất lúc: ${r.syncedAt || ''}`);
+}
+/* Đồng bộ THỦ CÔNG — MỘT cơ chế duy nhất cho mọi nút đồng bộ (nút "Đồng bộ" trên thanh đầu,
+   nút "Làm mới từ Sheet" ở Tra cứu, nút trong Cài đặt): đọc lại toàn bộ Sheet qua /api/sheet-sync,
+   nạp lại bootstrap + chip tồn kho, vẽ lại màn hình đang mở (giữ nguyên dữ liệu đang soạn trong S),
+   rồi bật thông báo hoàn tất đúng 1 lần. Đang chạy thì khoá, bấm thêm không chạy đợt mới. */
+let syncing = false;
+async function doSync() {
+  if (syncing) return;
+  syncing = true;
+  const btn = $('#syncBtn'); const oldLabel = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.classList.add('syncing'); btn.textContent = '⟳ Đang đồng bộ…'; }
+  try {
+    const r = await post('/api/sheet-sync');
+    S.boot = await api('/api/bootstrap');
+    setInvBadge();
+    if (S.view && VIEWS[S.view]) VIEWS[S.view](); // nạp lại dữ liệu đang hiển thị
+    await notifySyncDone(r);
+  } catch (e) { await alertErr('Đồng bộ thất bại', e.message); }
+  finally {
+    syncing = false;
+    if (btn) { btn.disabled = false; btn.classList.remove('syncing'); btn.textContent = oldLabel; }
+  }
 }
 function wsPill(s) {
   if (s.writeStatus === 'written') return '<span class="pill">Đã ghi Sheet</span>';
@@ -139,6 +162,7 @@ async function enterApp() {
   go(S.user.admin ? 'dashboard' : (NAV.find(([k]) => k !== 'settings' && S.user.perms[k]) || ['settings'])[0]);
 }
 function go(view) { S.view = view; S.slipLines = []; S.reconCodes = []; S.reconBusy = false; buildNav(); $('#viewTitle').textContent = t(view); VIEWS[view](); window.scrollTo(0, 0); }
+$('#syncBtn').onclick = () => doSync();
 $('#hamburger').onclick = () => { $('#sidebar').classList.toggle('open'); document.body.classList.toggle('nav-open'); };
 $('#scrim').onclick = () => { $('#sidebar').classList.remove('open'); document.body.classList.remove('nav-open'); };
 $('#logoutBtn').onclick = async () => { try { await post('/api/logout'); } catch {} S.token = ''; localStorage.removeItem('qk-token'); location.reload(); };
@@ -316,8 +340,11 @@ VIEWS.inventory = async () => {
   async function load(reset) {
     if (reset) page = 1;
     const r = await api(`/api/inventory?warehouse=${encodeURIComponent($('#invWh').value)}&q=${encodeURIComponent($('#invQ').value)}&filter=${filter}&page=${page}`);
+    // Chip "Tồn kho" trên thanh đầu dùng CHUNG số tổng hợp toàn kho do server trả kèm (cùng hàm
+    // warehouseSummary với bootstrap) → chip, dòng tóm tắt và bảng Tra cứu không bao giờ lệch nhau.
+    if (r.warehouseStock && S.boot) { S.boot.warehouseStock = r.warehouseStock; setInvBadge(); }
     $('#cAll').textContent = r.counts.all; $('#cAv').textContent = r.counts.available; $('#cOut').textContent = r.counts.out;
-    $('#invMeta').textContent = `Sản phẩm của kho — TỔNG HỢP theo mã từ mọi phiếu Nhập đã ghi (1 mã nhập nhiều lần chỉ hiện 1 dòng). "Tổng đã xuất" gồm xuất kho + nguyên liệu đưa vào chế biến; "Tồn thực tế" đã gồm thành phẩm chế biến nhập lại và điều chỉnh sau kiểm kho. Cập nhật: ${r.syncedAt || '—'}`;
+    $('#invMeta').textContent = `Sản phẩm của kho — TỔNG HỢP theo mã từ mọi phiếu Nhập đã ghi (1 mã nhập nhiều lần chỉ hiện 1 dòng). Tồn thực tế = Tổng đã nhập − Tổng đã xuất: "Tổng đã nhập" gồm phiếu Nhập + thành phẩm chế biến nhập lại kho; "Tổng đã xuất" gồm xuất kho + nguyên liệu đưa vào chế biến. Phiếu Kiểm kho chỉ để đối chiếu, KHÔNG thay đổi số tồn. Cập nhật: ${r.syncedAt || '—'}`;
     if (r.summary) $('#invSummary').innerHTML = `Tổng tồn thực tế trong kho: <b>${fmtKg(r.summary.totalQty)}</b> &nbsp;•&nbsp; <b>${r.summary.productCount}</b> mặt hàng đang có tồn <span class="mut">(theo sổ kho${$('#invWh').value ? ' của kho đang chọn' : ''})</span>`;
     const rows = r.items.map(i => `<tr><td>${esc(i.code) || '—'}</td><td><b>${esc(i.name)}</b><div class="mut">${esc(i.warehouse)}</div></td>
       <td>${esc(i.unit) || '—'}</td>
@@ -344,7 +371,7 @@ VIEWS.inventory = async () => {
   $('#invWh').onchange = () => load(true);
   $$('#view .chip').forEach(c => c.onclick = () => { $$('#view .chip').forEach(x => x.classList.remove('active')); c.classList.add('active'); filter = c.dataset.f; load(true); });
   $('#invMore').onclick = () => { page++; load(false); };
-  const rf = $('#invRefresh'); if (rf) rf.onclick = async () => { try { const r = await post('/api/sheet-sync'); S.boot.inventoryMeta = { count: r.count, syncedAt: r.syncedAt, posUpdatedAt: r.posUpdatedAt }; if (r.warehouseStock) { S.boot.warehouseStock = r.warehouseStock; setInvBadge(); } await notifySyncDone(r); load(true); } catch (e) { alertErr('Đồng bộ thất bại', e.message); } };
+  const rf = $('#invRefresh'); if (rf) rf.onclick = () => doSync(); // cùng MỘT cơ chế đồng bộ với nút "Đồng bộ" trên thanh đầu
   load(true);
 };
 
@@ -976,6 +1003,7 @@ VIEWS.history = async () => {
 VIEWS.calendar = async () => {
   const v = $('#view'); v.className = 'view';
   let evEdit = null; // sự kiện đang sửa bằng form INLINE trong panel ngày (null = đang ở chế độ thêm mới)
+  let evOpen = false; // form sự kiện đang XỔ XUỐNG (dropdown) trong panel ngày — mặc định thu gọn (v30)
   if (!S.calSel) {
     const now = new Date(); S.calY = now.getFullYear(); S.calM = now.getMonth(); S.calSel = bkkKey(0);
   }
@@ -1004,7 +1032,7 @@ VIEWS.calendar = async () => {
     return { cells, key, from: key(cells[0]), to: key(cells[41]) };
   }
   async function load() {
-    evEdit = null; // đổi tháng/ngày → form inline quay về chế độ thêm mới
+    evEdit = null; evOpen = false; // đổi tháng/ngày → form sự kiện thu gọn lại, quay về chế độ thêm mới
     const { cells, key, from, to } = gridRange();
     $('#calTitle').textContent = `Tháng ${S.calM + 1}/${S.calY}`;
     try { S.calData = await api(`/api/calendar?from=${from}&to=${to}`); } catch { S.calData = { arrivals: [], events: [] }; }
@@ -1043,10 +1071,12 @@ VIEWS.calendar = async () => {
         ${e.canEdit ? `<div style="margin-top:6px;display:flex;gap:6px"><button class="btn" data-ev-edit="${e.id}">Sửa</button><button class="btn danger" data-ev-del="${e.id}">Xoá</button></div>` : ''}</div>`;
     }
     if (!arrs.length && !evs.length) html += '<p class="mut">Ngày này chưa có hàng về hay sự kiện nào.</p>';
-    html += `<button class="btn primary" id="calAddEv" style="margin-top:4px">+ Thêm sự kiện</button>`;
-    /* Form thêm/sửa sự kiện INLINE ngay trong panel ngày (đúng bản cũ trước v26 — không dùng hộp thoại modal nữa) */
+    /* Form sự kiện dạng DROPDOWN trong panel ngày (v30): chỉ MỘT nút "+ Thêm sự kiện" — bấm để xổ
+       form xuống, bấm lại (hoặc nút Đóng/Huỷ sửa trong form) thì thu gọn. Không dùng hộp thoại modal. */
     const evF = evEdit;
-    html += `<div class="cal-ev-form" id="calEvForm">
+    const formOpen = !!(evF || evOpen);
+    html += `<button class="btn primary" id="calAddEv" style="margin-top:4px">+ Thêm sự kiện ${formOpen ? '▴' : '▾'}</button>`;
+    if (formOpen) html += `<div class="cal-ev-form" id="calEvForm">
       <b>${evF ? 'Sửa sự kiện' : 'Thêm sự kiện'}</b>
       <div class="field" style="margin-top:8px"><label class="f">Tiêu đề *</label><input class="in" id="calEvTitle" placeholder="VD: Nhận hàng cua từ NCC A" value="${evF ? esc(evF.title) : ''}"></div>
       <div class="grid2">
@@ -1055,8 +1085,8 @@ VIEWS.calendar = async () => {
       </div>
       <div class="field"><label class="f">Ghi chú</label><textarea class="in" id="calEvNote" rows="2">${evF ? esc(evF.note || '') : ''}</textarea></div>
       <div style="display:flex;gap:8px">
-        <button class="btn primary" id="calEvSave">${evF ? 'Lưu sự kiện' : 'Thêm sự kiện'}</button>
-        ${evF ? '<button class="btn" id="calEvCancel">Huỷ sửa</button>' : ''}
+        <button class="btn primary" id="calEvSave">${evF ? 'Lưu thay đổi' : 'Lưu'}</button>
+        <button class="btn" id="calEvCancel">${evF ? 'Huỷ sửa' : 'Đóng'}</button>
       </div>
     </div>`;
     $('#calDayBody').innerHTML = html;
@@ -1072,14 +1102,18 @@ VIEWS.calendar = async () => {
     });
     $$('#calDayBody [data-ev-edit]').forEach(b => b.onclick = () => {
       evEdit = evs.find(x => x.id === b.dataset.evEdit) || null;
+      evOpen = true; // bấm "Sửa" → form tự xổ xuống, đã điền sẵn dữ liệu
       renderDay();
       const t = $('#calEvTitle'); if (t) { t.focus(); t.scrollIntoView({ block: 'center' }); }
     });
     $('#calAddEv').onclick = () => {
-      if (evEdit) { evEdit = null; renderDay(); }
-      const t = $('#calEvTitle'); if (t) { t.focus(); t.scrollIntoView({ block: 'center' }); }
+      if (evEdit) { evEdit = null; evOpen = false; renderDay(); return; } // đang sửa mà bấm nút → huỷ sửa + thu gọn
+      evOpen = !evOpen;
+      renderDay();
+      if (evOpen) { const t = $('#calEvTitle'); if (t) { t.focus(); t.scrollIntoView({ block: 'center' }); } }
     };
-    $('#calEvSave').onclick = async () => {
+    const evSaveBtn = $('#calEvSave');
+    if (evSaveBtn) evSaveBtn.onclick = async () => {
       const body = { title: $('#calEvTitle').value, date: $('#calEvDate').value, time: $('#calEvTime').value, note: $('#calEvNote').value };
       if (!body.title.trim()) return alertWarn('Chưa nhập tiêu đề', 'Hãy nhập tiêu đề sự kiện.');
       if (!body.date) return alertWarn('Chưa chọn ngày', 'Hãy chọn ngày cho sự kiện.');
@@ -1087,7 +1121,7 @@ VIEWS.calendar = async () => {
         if (evEdit) await api('/api/calendar-events/' + encodeURIComponent(evEdit.id), { method: 'PUT', body: JSON.stringify(body) });
         else await post('/api/calendar-events', body);
         toast(evEdit ? 'Đã lưu sự kiện' : 'Đã thêm sự kiện');
-        evEdit = null;
+        evEdit = null; evOpen = false; // lưu xong form tự thu gọn
         S.calSel = body.date;
         const [yy, mm] = body.date.split('-').map(Number);
         S.calY = yy; S.calM = mm - 1;
@@ -1095,7 +1129,7 @@ VIEWS.calendar = async () => {
       } catch (e) { alertErr('Không lưu được sự kiện', e.message); }
     };
     const evCancelBtn = $('#calEvCancel');
-    if (evCancelBtn) evCancelBtn.onclick = () => { evEdit = null; renderDay(); };
+    if (evCancelBtn) evCancelBtn.onclick = () => { evEdit = null; evOpen = false; renderDay(); }; // Đóng / Huỷ sửa → thu gọn form
   }
   $('#calPrev').onclick = () => { S.calM--; if (S.calM < 0) { S.calM = 11; S.calY--; } load(); };
   $('#calNext').onclick = () => { S.calM++; if (S.calM > 11) { S.calM = 0; S.calY++; } load(); };
