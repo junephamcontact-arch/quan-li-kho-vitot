@@ -175,6 +175,8 @@ const state = {
   slips: [],            // {id,type,code,createdAt,dateKey,creatorName,warehouse,...,lines,rowRefs:[{tab,row}],writeStatus:'written'|'pending'|'error',writtenAt,writeError,rows?}
   exportCategories: null, // null = dùng mặc định; mảng tên phân loại xuất kho (APP_CAI_DAT: export_categories)
   calendarEvents: [],   // sự kiện lịch kiểu Google Calendar (APP_CAI_DAT: calendar_events)
+  posOrders: [],        // đơn POS kỳ vọng đối soát, đọc từ tab ĐƠN_POS_ẨN: {dateKey, orderId}
+  discrepancyStatus: {}, // trạng thái xử lí chênh lệch (APP_CAI_DAT: discrepancy_status): id -> {status, note, by, at}
   settingsRows: {},     // APP_CAI_DAT: key -> số dòng
   ipLock: { enabled: false, allow: [] },
   defaultWarehouse: '', // Kho mặc định (APP_CAI_DAT: default_warehouse)
@@ -289,7 +291,7 @@ function buildSlips(tables) {
     : { name: r[5] || '', sampleCode: r[6] || '', qty: numCell(r[7]), unit: r[8] || '', note: '' });
   group(tables[TABS.check] || [], 'check', (r, head) => head
     ? { createdAt: r[2] || '', dateKey: parseDateKey(r[2]), creatorName: r[9] || '', warehouse: r[1] || '', note: r[8] || '' }
-    : (() => { const ss = numCell(r[5]), c = numCell(r[6]), v = c - ss; return { sampleCode: r[3] || '', name: r[4] || '', systemStock: ss, counted: c, variance: v, matchStatus: v === 0 ? 'Khớp' : (v > 0 ? 'Thừa' : 'Thiếu') }; })());
+    : (() => { const ss = numCell(r[5]), c = numCell(r[6]), v = c - ss; return { sampleCode: r[3] || '', name: r[4] || '', systemStock: ss, counted: c, variance: v, matchStatus: v === 0 ? 'Khớp' : (v > 0 ? 'Thừa' : 'Thiếu'), refPresent: String(r[5] == null ? '' : r[5]).trim() !== '' }; })());
   group(tables[TABS.process] || [], 'process', (r, head) => head
     ? { createdAt: r[2] || '', dateKey: parseDateKey(r[2]), creatorName: r[16] || '', warehouse: r[1] || '', note: r[15] || '' }
     : (() => { const iq = numCell(r[5]), u = numCell(r[9]), d = numCell(r[10]); const loss = iq - u - d; return { name: r[4] || '', sampleCode: r[3] || '', inputQty: iq, usable: u, discard: d, loss, usablePct: iq ? +(u / iq * 100).toFixed(1) : 0, discardPct: iq ? +(d / iq * 100).toFixed(1) : 0, lossPct: iq ? +(loss / iq * 100).toFixed(1) : 0, finishedSku: r[6] || '', finishedName: r[7] || '', posQty: numCell(r[8]) }; })());
@@ -299,6 +301,40 @@ function buildSlips(tables) {
   // Mới nhất lên đầu: theo thứ tự dòng trong Sheet (dòng càng dưới càng mới)
   slips.sort((a, b) => (b.rowRefs[0] ? b.rowRefs[0].row : 0) - (a.rowRefs[0] ? a.rowRefs[0].row : 0));
   return slips;
+}
+
+/* ---- Tab ĐƠN_POS_ẨN: danh sách đơn POS dùng làm mốc "POS báo" cho đối soát ----
+   Cột khoá: "ID đơn hàng" + "Cập nhật lúc" (tra theo tên header). Dữ liệu thật từng gặp lệch cột
+   (dòng ngắn hơn header 1 ô) nên nếu ô tại vị trí header trống/không phải ngày giờ thì quét ngược
+   từ cuối dòng tìm ô dạng ngày giờ; mã đơn dự phòng lấy ô đầu tiên khác ô ngày giờ. */
+function parsePosOrders(rows) {
+  if (!rows.length) return [];
+  const headers = rows[0].map(h => String(h || '').trim());
+  const idIdx = headers.indexOf('ID đơn hàng');
+  const updIdx = headers.indexOf('Cập nhật lúc');
+  const out = [];
+  const seen = new Set();
+  for (const r of rows.slice(1)) {
+    const cells = (r || []).map(c => String(c == null ? '' : c).trim());
+    if (!cells.some(Boolean)) continue;
+    let updated = updIdx >= 0 ? (cells[updIdx] || '') : '';
+    if (!parseDateKey(updated)) {
+      updated = '';
+      for (let i = cells.length - 1; i >= 0; i--) {
+        if (/^\d{4}-\d{2}-\d{2}[ T]\d{1,2}:\d{2}/.test(cells[i]) || /^\d{4}-\d{2}-\d{2}$/.test(cells[i])) { updated = cells[i]; break; }
+      }
+    }
+    const dateKey = parseDateKey(updated);
+    if (!dateKey) continue;
+    let orderId = idIdx >= 0 ? (cells[idIdx] || '') : '';
+    if (!orderId || orderId === updated) orderId = cells.find(c => c && c !== updated) || '';
+    if (!orderId) continue;
+    const k = dateKey + '\u0001' + orderId;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push({ dateKey, orderId });
+  }
+  return out;
 }
 
 /* ---- Sổ kho độc lập: tồn kho do KHO tự quản, tính từ các phiếu ĐÃ GHI xuống Sheet ----
@@ -336,11 +372,19 @@ function buildCanon() {
 function normProdName(s) { return String(s || '').trim().replace(/\s+/g, ' ').toLowerCase(); }
 /* Tên hiển thị: giữ hoa thường như ghi trên phiếu, chỉ gọn khoảng trắng */
 function dispProdName(s) { return String(s || '').trim().replace(/\s+/g, ' '); }
+/* Kết quả phụ của 1 lần phát lại sổ kho (v33): dòng kiểm kèm "tồn sổ tại thời điểm kiểm" +
+   chuỗi biến động theo từng sản phẩm (thẻ kho). computeWarehouseStock() là hàm đồng bộ thuần
+   nên ghi kết quả phụ vào biến module này là an toàn (không có await xen giữa). */
+let ledgerExtra = { checkLines: [], eventsByKey: new Map() };
+function entryKeyOf(warehouse, code, name) { return (warehouse || '') + '\u0001' + (code || '') + '\u0002' + normProdName(name); }
 function computeWarehouseStock() {
   const canon = buildCanon();
   const canonCode = code => canon.get(code) || code || '';
   const round3 = n => Math.round(n * 1000) / 1000;
   const map = new Map();
+  const checkLines = [];
+  const eventsByKey = new Map();
+  const pushEvent = (k, ev) => { let a = eventsByKey.get(k); if (!a) { a = []; eventsByKey.set(k, a); } a.push(ev); };
   const entry = (wh, code, name, unit) => {
     const c = canonCode(String(code || '').trim());
     // ĐỊNH DANH sản phẩm = mã đã chuẩn hoá + TÊN ghi trên dòng phiếu (đã chuẩn hoá):
@@ -358,7 +402,8 @@ function computeWarehouseStock() {
         // còn điều chỉnh tồn. Hằng đẳng thức (v30): stock = totalIn − totalOut.
         totalIn: 0, totalOut: 0, processIn: 0,
         fromInbound: false, // true khi sản phẩm từng xuất hiện trong 1 phiếu Nhập đã ghi — chỉ những mã này mới thuộc "sản phẩm của kho"
-        lastInAt: '', lastInKey: ''
+        lastInAt: '', lastInKey: '',
+        lastMoveAt: '', lastMoveKey: '' // biến động kho gần nhất (nhập/xuất/chế biến) — cho cảnh báo tồn đọng + mốc ngày của tồn âm
       };
       map.set(k, e);
     }
@@ -371,37 +416,63 @@ function computeWarehouseStock() {
   slips.sort((a, b) => { const ka = slipTimeKey(a), kb = slipTimeKey(b); return ka < kb ? -1 : ka > kb ? 1 : 0; });
   for (const s of slips) {
     const wh = s.warehouse || '';
+    const tk = slipTimeKey(s);
+    const touchMove = e => { if (tk >= (e.lastMoveKey || '')) { e.lastMoveKey = tk; e.lastMoveAt = s.createdAt || ''; } };
     if (s.type === 'in') for (const l of s.lines || []) {
       const qty = Number(l.qty) || 0;
       const e = entry(wh, l.sampleCode, l.name, l.unit);
       e.stock = round3(e.stock + qty);
       e.totalIn = round3(e.totalIn + qty);
       e.fromInbound = true;
-      const tk = slipTimeKey(s);
+      touchMove(e);
       if (s.createdAt && tk >= (e.lastInKey || '')) { e.lastInKey = tk; e.lastInAt = s.createdAt; }
+      pushEvent(entryKeyOf(wh, e.code, l.name), { at: s.createdAt || '', timeKey: tk, type: 'nhap', code: s.code, by: s.creatorName || '', delta: qty, balanceAfter: e.stock });
     }
     else if (s.type === 'out') for (const l of s.lines || []) {
       const qty = Number(l.qty) || 0;
       const e = entry(wh, l.sampleCode, l.name, l.unit);
       e.stock = round3(e.stock - qty);
       e.totalOut = round3(e.totalOut + qty);
+      touchMove(e);
+      pushEvent(entryKeyOf(wh, e.code, l.name), { at: s.createdAt || '', timeKey: tk, type: 'xuat', code: s.code, by: s.creatorName || '', delta: -qty, balanceAfter: e.stock });
     }
-    // Phiếu Kiểm kho (type 'check') cố ý KHÔNG được phát lại ở đây: từ v30 kiểm kho chỉ đối
-    // chiếu, không đặt lại/điều chỉnh tồn — tồn chỉ do Nhập/Xuất/Chế biến quyết định.
+    // Phiếu Kiểm kho (type 'check') KHÔNG thay đổi số tồn (quy tắc v30) — khi phát lại chỉ GHI NHẬN:
+    // tồn sổ tại đúng thời điểm kiểm (số dư đang chạy của sản phẩm) để đối chiếu với số đếm,
+    // và 1 sự kiện thẻ kho delta 0. Riêng dòng kiểm GÕ TAY có ghi sẵn cột "tồn hệ thống" thì ưu tiên
+    // số đã ghi đó làm mốc đối chiếu (không có thì dùng tồn sổ phát lại).
+    else if (s.type === 'check') for (const l of s.lines || []) {
+      const c = canonCode(String(l.sampleCode || '').trim());
+      const k = entryKeyOf(wh, c, l.name);
+      const e = map.get(k);
+      const replayBook = e ? e.stock : 0;
+      const book = (s.manual && l.refPresent) ? (Number(l.systemStock) || 0) : replayBook;
+      const counted = Number(l.counted) || 0;
+      checkLines.push({
+        slipCode: s.code, at: s.createdAt || '', timeKey: tk, dateKey: s.dateKey || '', user: s.creatorName || '',
+        warehouse: wh, code: c, name: dispProdName(l.name), unit: (e && e.unit) || '',
+        counted, book, varBook: round3(counted - book), manual: !!s.manual
+      });
+      pushEvent(k, { at: s.createdAt || '', timeKey: tk, type: 'kiem', code: s.code, by: s.creatorName || '', delta: 0, balanceAfter: replayBook, counted, book });
+    }
     else if (s.type === 'process') for (const l of s.lines || []) {
       const iq = Number(l.inputQty) || 0;
       const inp = entry(wh, l.sampleCode, l.name, '');
       inp.stock = round3(inp.stock - iq);
       inp.totalOut = round3(inp.totalOut + iq); // nguyên liệu rời kho đi chế biến cũng là 1 dạng "đã xuất khỏi kho"
+      touchMove(inp);
+      pushEvent(entryKeyOf(wh, inp.code, l.name), { at: s.createdAt || '', timeKey: tk, type: 'chebien-out', code: s.code, by: s.creatorName || '', delta: -iq, balanceAfter: inp.stock });
       if (l.finishedSku || l.finishedName) {
         const pq = Number(l.posQty) || 0;
         const fin = entry(wh, l.finishedSku, l.finishedName, '');
         fin.stock = round3(fin.stock + pq);
         fin.totalIn = round3(fin.totalIn + pq); // thành phẩm nhập lại kho tính vào TỔNG NHẬP (công thức tồn v30)
         fin.processIn = round3(fin.processIn + pq);
+        touchMove(fin);
+        pushEvent(entryKeyOf(wh, fin.code, l.finishedName), { at: s.createdAt || '', timeKey: tk, type: 'chebien-in', code: s.code, by: s.creatorName || '', delta: pq, balanceAfter: fin.stock });
       }
     }
   }
+  ledgerExtra = { checkLines, eventsByKey };
   return [...map.values()];
 }
 
@@ -483,8 +554,159 @@ function posComparison(entries, q) {
   return { rows: filtered, mismatchCount, totalRows };
 }
 
+/* ================= v33: GIÁM SÁT ADMIN — helper dùng chung ================= */
+const round3 = n => Math.round(n * 1000) / 1000;
+function addDaysKey(key, n) {
+  const d = new Date(key + 'T00:00:00+07:00');
+  d.setTime(d.getTime() + n * 864e5);
+  const parts = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(d);
+  const pp = {}; parts.forEach(x => pp[x.type] = x.value);
+  return `${pp.year}-${pp.month}-${pp.day}`;
+}
+function daysBetween(a, b) { // số ngày từ a đến b (b − a), theo ngày lịch
+  const da = new Date(a + 'T00:00:00+07:00'), db = new Date(b + 'T00:00:00+07:00');
+  return Math.round((db - da) / 864e5);
+}
+/* Tồn POS hiện tại gộp theo định danh sản phẩm (mã chuẩn hoá + tên) — cùng cách gộp với posComparison */
+function posStockByProdKey() {
+  const canon = buildCanon();
+  const map = new Map();
+  for (const i of state.inventory.items) {
+    const c = canon.get(i.sampleCode || i.sku) || i.sampleCode || i.sku || '';
+    if (!c) continue;
+    const k = c + '\u0002' + normProdName(productLabel(i, null));
+    let g = map.get(k);
+    if (!g) { g = { stock: 0, sellable: 0 }; map.set(k, g); }
+    g.stock = round3(g.stock + (Number(i.stock) || 0));
+    g.sellable = round3(g.sellable + (Number(i.sellable) || 0));
+  }
+  return map;
+}
+function prodKeyOf(warehouse, code, name) { return `${warehouse || ''}|${code || ''}|${normProdName(name)}`; }
+/* Đơn POS kỳ vọng theo ngày (từ ĐƠN_POS_ẨN) */
+function expectedOrdersByDate() {
+  const map = new Map();
+  for (const o of state.posOrders) {
+    let s = map.get(o.dateKey);
+    if (!s) { s = new Set(); map.set(o.dateKey, s); }
+    s.add(o.orderId);
+  }
+  return map;
+}
+/* Mã đã quét theo ngày — CHỈ tính phiên đã ghi xuống Sheet (đúng dữ liệu tab ĐỐI_SOÁT_ĐƠN) */
+function scannedWrittenByDate() {
+  const map = new Map();
+  for (const s of state.slips) {
+    if (s.type !== 'recon' || s.writeStatus !== 'written' || !s.dateKey) continue;
+    let a = map.get(s.dateKey);
+    if (!a) { a = []; map.set(s.dateKey, a); }
+    for (const l of s.lines || []) if (l.code) a.push(l.code);
+  }
+  return map;
+}
+function reconDayStats(date, expMap, scanMap) {
+  const expected = [...(expMap.get(date) || [])];
+  const scannedRows = scanMap.get(date) || [];
+  const scannedSet = new Set(scannedRows);
+  const expSet = new Set(expected);
+  return {
+    date, hasExpected: expMap.has(date),
+    expected, expectedCount: expected.length,
+    scannedRows: scannedRows.length, scannedDistinct: scannedSet.size,
+    missing: expected.filter(c => !scannedSet.has(c)),
+    extra: [...scannedSet].filter(c => !expSet.has(c)),
+    duplicates: scannedRows.length - scannedSet.size
+  };
+}
+/* Danh mục chênh lệch cần xử lí (v33 §9): lệch kiểm kho (varBook ≠ 0) + đơn POS thiếu khi đối soát
+   + sản phẩm tồn âm. Mỗi mục có id ổn định để lưu trạng thái xử lí vào APP_CAI_DAT. */
+function computeDiscrepancies() {
+  const allEntries = computeWarehouseStock(); // làm mới ledgerExtra + số dư (hàm thuần, gọi lại an toàn)
+  const items = [];
+  for (const cl of ledgerExtra.checkLines) {
+    if (cl.varBook === 0) continue;
+    const pk = prodKeyOf(cl.warehouse, cl.code, cl.name);
+    items.push({
+      id: `KK:${cl.slipCode}:${pk}`, kind: 'kiem', date: cl.dateKey || '', at: cl.at, user: cl.user,
+      warehouse: cl.warehouse, code: cl.code, name: cl.name,
+      detail: `Đếm ${cl.counted} · Tồn sổ ${cl.book} · Lệch ${cl.varBook > 0 ? '+' : ''}${cl.varBook}`
+    });
+  }
+  const expMap = expectedOrdersByDate(), scanMap = scannedWrittenByDate();
+  const dates = new Set([...expMap.keys(), ...scanMap.keys()]);
+  for (const date of dates) {
+    const st = reconDayStats(date, expMap, scanMap);
+    for (const code of st.missing) {
+      items.push({ id: `DS:${date}:${code}`, kind: 'doisoat', date, at: date, user: '', warehouse: '', code, name: code, detail: `Đơn POS chưa được quét trong phiên đối soát ngày ${date}` });
+    }
+  }
+  for (const e of allEntries) {
+    if (e.stock >= 0) continue;
+    const pk = prodKeyOf(e.warehouse, e.code, e.name);
+    items.push({
+      id: `AM:${pk}`, kind: 'amkho', date: e.lastMoveKey ? e.lastMoveKey.slice(0, 10) : (parseDateKey(e.lastMoveAt) || ''), at: e.lastMoveAt || '',
+      user: '', warehouse: e.warehouse, code: e.code, name: e.name,
+      detail: `Tồn sổ kho đang ÂM ${e.stock} tại ${e.warehouse || 'kho cửa hàng'} (đã xuất/chế biến nhiều hơn nhập)`
+    });
+  }
+  // Ghép trạng thái đã lưu (mặc định 'open' = Chưa xử lí)
+  const tk = todayKey();
+  for (const it of items) {
+    const st = state.discrepancyStatus[it.id] || {};
+    it.status = ['open', 'explained', 'resolved'].includes(st.status) ? st.status : 'open';
+    it.note = st.note || '';
+    it.statusBy = st.by || '';
+    it.statusAt = st.at || '';
+    it.ageDays = it.date ? Math.max(0, daysBetween(it.date, tk)) : 0;
+  }
+  items.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || a.id.localeCompare(b.id));
+  return items;
+}
+
+/* ---- Kỳ lọc + thống kê cho các endpoint giám sát ADMIN ---- */
+const TYPE_LBL_SRV = { in: 'Nhập hàng', out: 'Xuất hàng', check: 'Kiểm kho', process: 'Chế biến', recon: 'Đối soát đơn' };
+function parsePeriod(sp) {
+  const tk = todayKey();
+  let from = sp.get('from') || tk, to = sp.get('to') || tk;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) from = tk;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(to)) to = tk;
+  if (from > to) return { error: 'Khoảng ngày không hợp lệ: ngày bắt đầu phải trước hoặc bằng ngày kết thúc.' };
+  return { from, to };
+}
+function prevPeriodOf(from, to) { // kỳ liền trước, dài bằng đúng kỳ đang xét
+  const len = daysBetween(from, to) + 1;
+  const pTo = addDaysKey(from, -1);
+  return { from: addDaysKey(pTo, -(len - 1)), to: pTo };
+}
+function checkStatsFor(from, to) {
+  computeWarehouseStock();
+  const lines = ledgerExtra.checkLines.filter(l => (l.dateKey || '') >= from && (l.dateKey || '') <= to);
+  const matched = lines.filter(l => l.counted === l.book).length;
+  let negVar = 0, bookSum = 0;
+  for (const l of lines) { bookSum += l.book; if (l.counted < l.book) negVar += l.book - l.counted; }
+  return { count: lines.length, accuracy: lines.length ? +(matched / lines.length * 100).toFixed(1) : null, negVar: round3(negVar), bookSum: round3(bookSum) };
+}
+function processStatsFor(from, to) { // chỉ phiếu ĐÃ GHI Sheet — khớp với sổ kho
+  let input = 0, usable = 0, discard = 0, loss = 0, batches = 0;
+  for (const s of state.slips) {
+    if (s.type !== 'process' || s.writeStatus !== 'written') continue;
+    if ((s.dateKey || '') < from || (s.dateKey || '') > to) continue;
+    batches++;
+    for (const l of s.lines || []) { input += Number(l.inputQty) || 0; usable += Number(l.usable) || 0; discard += Number(l.discard) || 0; loss += Number(l.loss) || 0; }
+  }
+  return { input: round3(input), usable: round3(usable), discard: round3(discard), loss: round3(loss), batches };
+}
+function reconStatsFor(from, to) {
+  const expMap = expectedOrdersByDate(), scanMap = scannedWrittenByDate();
+  const expected = new Set(), scanned = new Set();
+  for (const [d, set] of expMap) if (d >= from && d <= to) set.forEach(c => expected.add(c));
+  for (const [d, arr] of scanMap) if (d >= from && d <= to) arr.forEach(c => scanned.add(c));
+  let matched = 0; expected.forEach(c => { if (scanned.has(c)) matched++; });
+  return { expected: expected.size, scanned: scanned.size, matched, pct: expected.size ? +(matched / expected.size * 100).toFixed(1) : null };
+}
+
 async function readAllTables(sheetId) {
-  const names = ['TỒN_KHO_POS', 'CẤU_HÌNH', TABS.in, TABS.out, TABS.check, TABS.process, TABS.recon, 'APP_CAI_DAT'];
+  const names = ['TỒN_KHO_POS', 'CẤU_HÌNH', TABS.in, TABS.out, TABS.check, TABS.process, TABS.recon, 'ĐƠN_POS_ẨN', 'APP_CAI_DAT'];
   const tables = {};
   if (WRITABLE) {
     const meta = await sheetsApi('GET', `/v4/spreadsheets/${sheetId}`);
@@ -526,6 +748,13 @@ async function loadCache(followPointer) {
   if (settings.calendar_events) {
     try { const arr = JSON.parse(settings.calendar_events); if (Array.isArray(arr)) state.calendarEvents = arr.filter(e => e && e.id && e.date); } catch {}
   }
+  state.discrepancyStatus = {};
+  if (settings.discrepancy_status) {
+    try { const j = JSON.parse(settings.discrepancy_status); if (j && typeof j === 'object' && !Array.isArray(j)) state.discrepancyStatus = j; } catch {}
+  }
+  // ĐƠN_POS_ẨN → danh sách đơn POS kỳ vọng cho đối soát, nhóm theo ngày của cột "Cập nhật lúc".
+  // Dữ liệu đổ từ POS có thể lệch 1 cột so với header nên tra theo TÊN cột + dự phòng quét ô ngày giờ ở cuối dòng.
+  state.posOrders = parsePosOrders(tables['ĐƠN_POS_ẨN'] || []);
   let pendingSlips = [];
   if (settings.pending_slips) {
     try { const arr = JSON.parse(settings.pending_slips); if (Array.isArray(arr)) pendingSlips = arr.filter(s => s && s.code && Array.isArray(s.rows)); } catch {}
@@ -877,10 +1106,28 @@ async function api(req, res, url) {
     // NHÂN VIÊN (không phải ADMIN) tuyệt đối không nhận số liệu POS: ép bản rút gọn chỉ gồm
     // tên + mã + phân loại + kho + danh mục (đủ để chọn sản phẩm), KHÔNG có tồn/bán POS.
     const blind = url.searchParams.get('blind') === '1' || !isAdmin(user);
-    const items = state.inventory.items.map(i => blind
-      ? { key: i.key, name: i.name, variant: i.variant, sampleCode: i.sampleCode, warehouse: i.warehouse, category: i.category }
-      : { key: i.key, sku: i.sku, name: i.name, variant: i.variant, sampleCode: i.sampleCode, barcode: i.barcode, category: i.category, warehouse: i.warehouse, supplier: i.supplier, sellable: i.sellable, stock: i.stock });
-    return send(res, 200, { items });
+    if (blind) {
+      const items = state.inventory.items.map(i => ({ key: i.key, name: i.name, variant: i.variant, sampleCode: i.sampleCode, warehouse: i.warehouse, category: i.category }));
+      return send(res, 200, { items });
+    }
+    // ADMIN: kèm warehouses[] (tách từ chuỗi "Kho thao tác") + ĐVT (tra từ sổ kho theo mã + tên;
+    // tab TỒN_KHO_POS không có cột ĐVT) + danh sách kho POS để dựng tab xem theo kho (v33 §4).
+    const unitByProd = new Map();
+    for (const e of warehouseEntries()) {
+      const k = e.code + '\u0002' + normProdName(e.name);
+      if (e.unit && !unitByProd.has(k)) unitByProd.set(k, e.unit);
+    }
+    const canon = buildCanon();
+    const items = state.inventory.items.map(i => {
+      const c = canon.get(i.sampleCode || i.sku) || i.sampleCode || i.sku || '';
+      return {
+        key: i.key, sku: i.sku, name: i.name, variant: i.variant, sampleCode: i.sampleCode, barcode: i.barcode,
+        category: i.category, warehouse: i.warehouse, supplier: i.supplier, sellable: i.sellable, stock: i.stock,
+        warehouses: [...splitWarehouses([i])],
+        unit: unitByProd.get(c + '\u0002' + normProdName(productLabel(i, null))) || ''
+      };
+    });
+    return send(res, 200, { items, posWarehouses: [...splitWarehouses(state.inventory.items)] });
   }
 
   /* "Sản phẩm của kho" — dataset TỔNG HỢP từ các phiếu NHẬP đã ghi (gộp theo mã + TÊN, 1 dòng/định danh/kho):
@@ -1027,6 +1274,214 @@ async function api(req, res, url) {
       if (slip.writeStatus !== 'written') return send(res, 400, { error: 'Ghi lại vẫn lỗi: ' + slip.writeError });
       return send(res, 200, { slip: stripBlind(slip, user) });
     } catch (e) { return send(res, e.message === READONLY_MSG ? 403 : 400, { error: e.message }); }
+  }
+
+  /* ================= v33: API GIÁM SÁT — CHỈ ADMIN ================= */
+  if (p === '/api/slip' && method === 'GET') {
+    if (!isAdmin(user) && !permsOf(user).history) return send(res, 403, { error: 'Không có quyền xem chi tiết phiếu.' });
+    const code = url.searchParams.get('code') || '';
+    const type = url.searchParams.get('type') || '';
+    const s = state.slips.find(x => x.code === code && (!type || x.type === type)) || state.slips.find(x => x.code === code);
+    if (!s) return send(res, 404, { error: 'Không tìm thấy phiếu.' });
+    return send(res, 200, { slip: stripBlind(s, user) });
+  }
+
+  if (p === '/api/admin/overview' && method === 'GET') {
+    if (!needAdmin(req, res)) return;
+    const per = parsePeriod(url.searchParams);
+    if (per.error) return send(res, 400, { error: per.error });
+    const { from, to } = per;
+    const prev = prevPeriodOf(from, to);
+    const cs = checkStatsFor(from, to), csP = checkStatsFor(prev.from, prev.to);
+    const ps = processStatsFor(from, to), psP = processStatsFor(prev.from, prev.to);
+    const haoHutOf = (c, pr) => { const den = c.bookSum + pr.input; return den > 0 ? +(((c.negVar + pr.loss) / den) * 100).toFixed(2) : null; };
+    const yieldOf = pr => pr.input > 0 ? +(pr.usable / pr.input * 100).toFixed(1) : null;
+    const rs = reconStatsFor(from, to), rsP = reconStatsFor(prev.from, prev.to);
+    const delta = (v, pv) => (v == null || pv == null) ? null : +(v - pv).toFixed(1);
+    const lightHigh = (v, g, y) => v == null ? 'none' : (v >= g ? 'green' : v >= y ? 'yellow' : 'red'); // cao = tốt
+    const lightLow = (v, g, y) => v == null ? 'none' : (v <= g ? 'green' : v <= y ? 'yellow' : 'red'); // thấp = tốt
+    // Chênh lệch cửa hàng ↔ POS: ảnh chụp HIỆN TẠI (không so kỳ trước)
+    const pc = posComparison(warehouseEntries(), '');
+    let pcNum = 0, pcDen = 0;
+    for (const r of pc.rows) if (r.posStock > 0) { pcNum += Math.abs(r.diff); pcDen += r.posStock; }
+    const posDiff = pcDen > 0 ? +(pcNum / pcDen * 100).toFixed(1) : null;
+    // Vụ bất thường còn treo
+    const discs = computeDiscrepancies();
+    const openDisc = discs.filter(d => d.status !== 'resolved');
+    const oldestDays = openDisc.reduce((a, d) => Math.max(a, d.ageDays || 0), 0);
+    // ageDays ≥ 2 theo ngày lịch ≈ vụ đã treo quá ~48 giờ
+    const treoLight = openDisc.length === 0 ? 'green' : (openDisc.length <= 3 && oldestDays < 2 ? 'yellow' : 'red');
+    const kpis = {
+      accuracy: { value: cs.accuracy, delta: delta(cs.accuracy, csP.accuracy), light: lightHigh(cs.accuracy, 98, 95), extra: { lines: cs.count, prevLines: csP.count } },
+      shrinkage: { value: haoHutOf(cs, ps), delta: delta(haoHutOf(cs, ps), haoHutOf(csP, psP)), light: lightLow(haoHutOf(cs, ps), 1, 3), extra: { negVar: cs.negVar, processLoss: ps.loss } },
+      posDiff: { value: posDiff, delta: null, light: lightLow(posDiff, 2, 5), extra: { mismatchCount: pc.mismatchCount, totalRows: pc.totalRows } },
+      yield: { value: yieldOf(ps), delta: delta(yieldOf(ps), yieldOf(psP)), light: lightHigh(yieldOf(ps), 75, 65), extra: { inputKg: ps.input, batches: ps.batches, discardPct: ps.input > 0 ? +(ps.discard / ps.input * 100).toFixed(1) : null, lossPct: ps.input > 0 ? +(ps.loss / ps.input * 100).toFixed(1) : null } },
+      recon: { value: rs.pct, delta: delta(rs.pct, rsP.pct), light: lightHigh(rs.pct, 98, 95), extra: { expected: rs.expected, scanned: rs.scanned, matched: rs.matched } },
+      openIssues: { value: openDisc.length, delta: null, light: treoLight, extra: { oldestDays } }
+    };
+    /* HỘP CẢNH BÁO */
+    const alerts = [];
+    const allEntries = computeWarehouseStock();
+    for (const e of allEntries) if (e.stock < 0) alerts.push({ severity: 'red', target: 'goods', text: `Tồn ÂM: ${e.name} tại ${e.warehouse || 'kho cửa hàng'} đang ${e.stock} ${e.unit || ''} — đã xuất/chế biến nhiều hơn số đã nhập.` });
+    for (const s of state.slips) if (s.writeStatus === 'error') alerts.push({ severity: 'red', target: 'history', text: `Phiếu ${s.code} (${TYPE_LBL_SRV[s.type] || s.type}) GHI LỖI Sheet${s.writeError ? ': ' + s.writeError : ''} — vào Lịch sử phiếu bấm "Ghi lại".` });
+    for (const cl of ledgerExtra.checkLines) {
+      if ((cl.dateKey || '') < from || (cl.dateKey || '') > to || cl.varBook === 0) continue;
+      const th = Math.max(5, Math.abs(cl.book) * 0.2);
+      if (Math.abs(cl.varBook) >= th) alerts.push({ severity: cl.varBook < 0 ? 'red' : 'yellow', target: 'stocktake', text: `Kiểm kho lệch lớn: ${cl.name} — đếm ${cl.counted}, tồn sổ ${cl.book}, lệch ${cl.varBook > 0 ? '+' : ''}${cl.varBook} (phiếu ${cl.slipCode}, ${cl.user}).` });
+    }
+    {
+      const expMap = expectedOrdersByDate(), scanMap = scannedWrittenByDate(), tk = todayKey();
+      for (let i = 0; i < 7; i++) {
+        const d = addDaysKey(tk, -i);
+        const st = reconDayStats(d, expMap, scanMap);
+        if (st.hasExpected && st.missing.length) alerts.push({ severity: 'red', target: 'recon', text: `Đối soát ${d}: POS báo ${st.expectedCount} đơn, còn THIẾU ${st.missing.length} đơn chưa quét (${st.missing.join(', ')}).` });
+      }
+    }
+    {
+      const tk = todayKey();
+      for (const e of allEntries) {
+        if (e.stock <= 0) continue;
+        const md = e.lastMoveKey ? e.lastMoveKey.slice(0, 10) : '';
+        if (!md || daysBetween(md, tk) >= 5) alerts.push({ severity: 'yellow', target: 'goods', text: `Tồn đọng: ${e.name} còn ${e.stock} ${e.unit || ''} tại ${e.warehouse || 'kho cửa hàng'} — biến động gần nhất ${md || 'không rõ'} (≥5 ngày chưa xuất).` });
+      }
+    }
+    return send(res, 200, { period: { from, to }, prevPeriod: prev, kpis, alerts });
+  }
+
+  if (p === '/api/admin/activity' && method === 'GET') {
+    if (!needAdmin(req, res)) return;
+    const per = parsePeriod(url.searchParams);
+    if (per.error) return send(res, 400, { error: per.error });
+    const fUser = url.searchParams.get('user') || '';
+    const fType = url.searchParams.get('type') || '';
+    const items = [];
+    for (const s of state.slips) {
+      const dk = s.dateKey || '';
+      if (dk < per.from || dk > per.to) continue;
+      if (fUser && s.creatorName !== fUser) continue;
+      if (fType && s.type !== fType) continue;
+      const lines = s.lines || [];
+      let summary = '';
+      if (s.type === 'recon') { const codes = lines.map(l => l.code); summary = `${codes.length} mã quét · ${new Set(codes).size} đơn`; }
+      else if (s.type === 'process') summary = `${lines.length} dòng · tổng SL ${round3(lines.reduce((a, l) => a + (Number(l.inputQty) || 0), 0))} Kg đầu vào`;
+      else if (s.type === 'check') summary = `${lines.length} dòng · tổng SL ${round3(lines.reduce((a, l) => a + (Number(l.counted) || 0), 0))}`;
+      else summary = `${lines.length} dòng · tổng SL ${round3(lines.reduce((a, l) => a + (Number(l.qty) || 0), 0))}`;
+      items.push({ at: s.createdAt || '', timeKey: slipTimeKey(s), dateKey: dk, user: s.creatorName || '', type: s.type, code: s.code, slipId: s.id, summary, writeStatus: s.writeStatus });
+    }
+    items.sort((a, b) => b.timeKey.localeCompare(a.timeKey) || b.code.localeCompare(a.code));
+    return send(res, 200, { period: per, items });
+  }
+
+  if (p === '/api/admin/recon-check' && method === 'GET') {
+    if (!needAdmin(req, res)) return;
+    const per = parsePeriod(url.searchParams);
+    if (per.error) return send(res, 400, { error: per.error });
+    if (daysBetween(per.from, per.to) > 62) return send(res, 400, { error: 'Khoảng ngày quá dài — màn đối soát chỉ xem tối đa 62 ngày.' });
+    const expMap = expectedOrdersByDate(), scanMap = scannedWrittenByDate();
+    const discMap = new Map(computeDiscrepancies().map(d => [d.id, d]));
+    const days = [];
+    for (let d = per.from; ; d = addDaysKey(d, 1)) {
+      const st = reconDayStats(d, expMap, scanMap);
+      st.missingItems = st.missing.map(code => {
+        const disc = discMap.get(`DS:${d}:${code}`);
+        return { code, id: `DS:${d}:${code}`, status: disc ? disc.status : 'open', note: disc ? disc.note : '' };
+      });
+      days.push(st);
+      if (d >= per.to) break;
+    }
+    days.reverse();
+    return send(res, 200, { period: per, days });
+  }
+
+  if (p === '/api/admin/checks' && method === 'GET') {
+    if (!needAdmin(req, res)) return;
+    const per = parsePeriod(url.searchParams);
+    if (per.error) return send(res, 400, { error: per.error });
+    computeWarehouseStock();
+    const posMap = posStockByProdKey();
+    const discMap = new Map(computeDiscrepancies().map(d => [d.id, d]));
+    const items = ledgerExtra.checkLines
+      .filter(cl => (cl.dateKey || '') >= per.from && (cl.dateKey || '') <= per.to)
+      .map(cl => {
+        const pos = posMap.get(cl.code + '\u0002' + normProdName(cl.name));
+        const posNow = pos ? pos.stock : 0;
+        const pk = prodKeyOf(cl.warehouse, cl.code, cl.name);
+        const id = `KK:${cl.slipCode}:${pk}`;
+        const disc = discMap.get(id);
+        return {
+          slipCode: cl.slipCode, at: cl.at, timeKey: cl.timeKey, dateKey: cl.dateKey, user: cl.user, warehouse: cl.warehouse,
+          productKey: pk, name: cl.name, unit: cl.unit, book: cl.book, counted: cl.counted, varBook: cl.varBook,
+          posNow, varPos: round3(cl.counted - posNow), discrepancyId: id,
+          status: disc ? disc.status : 'open', note: disc ? disc.note : ''
+        };
+      });
+    items.sort((a, b) => b.timeKey.localeCompare(a.timeKey) || b.slipCode.localeCompare(a.slipCode));
+    return send(res, 200, { period: per, items });
+  }
+
+  if (p === '/api/admin/staff-summary' && method === 'GET') {
+    if (!needAdmin(req, res)) return;
+    const per = parsePeriod(url.searchParams);
+    if (per.error) return send(res, 400, { error: per.error });
+    const map = new Map();
+    const rowOf = name => {
+      let r = map.get(name);
+      if (!r) { r = { name, in: 0, out: 0, check: 0, process: 0, recon: 0, reconCodes: 0, checkLines: 0, checkVarLines: 0, procInput: 0, procDiscard: 0 }; map.set(name, r); }
+      return r;
+    };
+    for (const s of state.slips) {
+      const dk = s.dateKey || '';
+      if (dk < per.from || dk > per.to) continue;
+      const r = rowOf(s.creatorName || '(không rõ)');
+      const lines = s.lines || [];
+      if (s.type === 'in') r.in++;
+      else if (s.type === 'out') r.out++;
+      else if (s.type === 'check') { r.check++; r.checkLines += lines.length; r.checkVarLines += lines.filter(l => (Number(l.variance) || 0) !== 0).length; }
+      else if (s.type === 'process') { r.process++; for (const l of lines) { r.procInput += Number(l.inputQty) || 0; r.procDiscard += Number(l.discard) || 0; } }
+      else if (s.type === 'recon') { r.recon++; r.reconCodes += lines.length; }
+    }
+    const rows = [...map.values()].map(r => ({ ...r, procInput: round3(r.procInput), procDiscard: round3(r.procDiscard), discardPct: r.procInput > 0 ? +(r.procDiscard / r.procInput * 100).toFixed(1) : 0 }));
+    rows.sort((a, b) => a.name.localeCompare(b.name, 'vi'));
+    return send(res, 200, { period: per, rows });
+  }
+
+  if (p === '/api/admin/discrepancies' && method === 'GET') {
+    if (!needAdmin(req, res)) return;
+    return send(res, 200, { items: computeDiscrepancies() });
+  }
+  if (p === '/api/admin/discrepancy-status' && method === 'POST') {
+    if (!needAdmin(req, res)) return;
+    const b = await readBody(req);
+    const id = String(b.id || '');
+    const status = String(b.status || '');
+    if (!id) return send(res, 400, { error: 'Thiếu mã chênh lệch.' });
+    if (!['open', 'explained', 'resolved'].includes(status)) return send(res, 400, { error: 'Trạng thái xử lí không hợp lệ.' });
+    state.discrepancyStatus[id] = { status, note: String(b.note || '').slice(0, 500), by: user.name, at: nowText() };
+    try { await setSetting('discrepancy_status', JSON.stringify(state.discrepancyStatus)); } catch (e) { /* chỉ đọc: giữ trong bộ nhớ */ }
+    const item = computeDiscrepancies().find(d => d.id === id) || { id, status, note: state.discrepancyStatus[id].note };
+    return send(res, 200, { ok: true, item });
+  }
+
+  if (p === '/api/admin/stock-card' && method === 'GET') {
+    if (!needAdmin(req, res)) return;
+    const wh = url.searchParams.get('warehouse') || '';
+    const code = url.searchParams.get('code') || '';
+    const name = url.searchParams.get('name') || '';
+    const entries = computeWarehouseStock();
+    const canon = buildCanon();
+    const canonCode = canon.get(code) || code || '';
+    const e = entries.find(x => x.warehouse === wh && x.code === canonCode && normProdName(x.name) === normProdName(name))
+      || entries.find(x => x.code === canonCode && normProdName(x.name) === normProdName(name))
+      || entries.find(x => x.code === canonCode);
+    const key = e ? entryKeyOf(e.warehouse, e.code, e.name) : entryKeyOf(wh, canonCode, name);
+    const events = (ledgerExtra.eventsByKey.get(key) || []).slice()
+      .sort((a, b) => b.timeKey.localeCompare(a.timeKey) || b.code.localeCompare(a.code))
+      .map(ev => ({ at: ev.at, type: ev.type, code: ev.code, by: ev.by, delta: ev.delta, balanceAfter: ev.balanceAfter, counted: ev.counted, book: ev.book }));
+    const pos = posStockByProdKey().get((e ? e.code : canonCode) + '\u0002' + normProdName(e ? e.name : name));
+    const entry = e
+      ? { warehouse: e.warehouse, code: e.code, name: e.name, unit: e.unit, stock: e.stock, totalIn: e.totalIn, totalOut: e.totalOut, processIn: e.processIn, posStock: pos ? pos.stock : 0 }
+      : { warehouse: wh, code: canonCode, name: dispProdName(name), unit: '', stock: 0, totalIn: 0, totalOut: 0, processIn: 0, posStock: pos ? pos.stock : 0 };
+    return send(res, 200, { entry, events });
   }
 
   /* ---- Phân loại xuất kho (ADMIN tuỳ chỉnh, lưu APP_CAI_DAT) ---- */
