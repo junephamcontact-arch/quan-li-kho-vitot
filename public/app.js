@@ -1,5 +1,5 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v33.261126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v34.261126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -295,20 +295,56 @@ function mountPeriodBar(box, onChange) {
     S.monFrom = f; S.monTo = tt; onChange();
   };
 }
-/* Trạng thái xử lí chênh lệch (v33 §9): select + ghi chú + Lưu — dùng ở Đối soát & Kiểm kho giám sát */
+/* Trạng thái xử lí chênh lệch (v34): badge gọn + nút ⋯ mở editor inline (select + ghi chú + Lưu/Huỷ) — dùng ở Đối soát & Kiểm kho giám sát.
+   Trạng thái hiện tại giữ ở discState: mở editor là prefill đúng, Lưu xong cập nhật badge tại chỗ (không refetch). Mỗi lần chỉ 1 editor mở. */
 const DISC_LBL = { open: 'Chưa xử lí', explained: 'Đã rõ nguyên nhân', resolved: 'Đã xử lí' };
-function discControlHTML(it) {
-  return `<span class="disc-ctl"><select class="in disc-sel" data-disc-id="${esc(it.id)}">${Object.entries(DISC_LBL).map(([k, l]) => `<option value="${k}" ${it.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select><input class="in disc-note" data-disc-note="${esc(it.id)}" placeholder="Ghi chú xử lí…" value="${esc(it.note || '')}"><button class="btn disc-save" data-disc-save="${esc(it.id)}">Lưu</button></span>`;
+const discState = new Map();
+const fmtDateVN = k => { const p = String(k || '').split('-'); return p.length === 3 ? `${p[2]}/${p[1]}/${p[0]}` : String(k || ''); };
+function discBadgesInner(st) {
+  return `<span class="disc-badge ${st.status}">${DISC_LBL[st.status] || DISC_LBL.open}</span>${st.note ? `<span class="disc-note-ic" title="${esc(st.note)}">✎</span>` : ''}`;
 }
-function wireDiscControls(root, onSaved) {
-  root.querySelectorAll('[data-disc-save]').forEach(b => b.onclick = async () => {
-    const id = b.dataset.discSave;
-    const sel = root.querySelector(`[data-disc-id="${CSS.escape(id)}"]`);
-    const note = root.querySelector(`[data-disc-note="${CSS.escape(id)}"]`);
-    b.disabled = true;
-    try { await post('/api/admin/discrepancy-status', { id, status: sel ? sel.value : 'open', note: note ? note.value : '' }); toast('Đã lưu trạng thái xử lí'); if (onSaved) onSaved(); }
-    catch (e) { alertErr('Không lưu được trạng thái', e.message); }
-    b.disabled = false;
+function discCellHTML(it) {
+  discState.set(it.id, { status: it.status || 'open', note: it.note || '' });
+  return `<span class="disc-badges" data-disc-badges="${esc(it.id)}">${discBadgesInner(discState.get(it.id))}</span> <button class="btn disc-dots" data-disc-dots="${esc(it.id)}" title="Cập nhật trạng thái / ghi chú xử lí">⋯</button>`;
+}
+function discEditorInnerHTML() {
+  return `<span class="disc-editor"><select class="in disc-sel">${Object.entries(DISC_LBL).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select><input class="in disc-note" placeholder="Ghi chú xử lí…"><button class="btn primary disc-save">Lưu</button><button class="btn disc-cancel">Huỷ</button></span>`;
+}
+function wireDiscCompact(root) {
+  const closeAll = () => root.querySelectorAll('[data-disc-panel]').forEach(p => p.classList.add('hidden'));
+  root.querySelectorAll('[data-disc-dots]').forEach(b => b.onclick = () => {
+    const id = b.dataset.discDots;
+    const panel = root.querySelector(`[data-disc-panel="${CSS.escape(id)}"]`);
+    if (!panel) return;
+    const willOpen = panel.classList.contains('hidden');
+    closeAll();
+    if (willOpen) {
+      const st = discState.get(id) || { status: 'open', note: '' };
+      const sel = panel.querySelector('.disc-sel'); if (sel) sel.value = st.status;
+      const note = panel.querySelector('.disc-note'); if (note) note.value = st.note;
+      panel.classList.remove('hidden');
+      if (note) note.focus();
+    }
+  });
+  root.querySelectorAll('[data-disc-panel]').forEach(p => {
+    const id = p.dataset.discPanel;
+    const cancel = p.querySelector('.disc-cancel');
+    if (cancel) cancel.onclick = () => p.classList.add('hidden');
+    const save = p.querySelector('.disc-save');
+    if (save) save.onclick = async () => {
+      const sel = p.querySelector('.disc-sel');
+      const note = p.querySelector('.disc-note');
+      const status = sel ? sel.value : 'open', noteVal = note ? note.value : '';
+      save.disabled = true;
+      try {
+        await post('/api/admin/discrepancy-status', { id, status, note: noteVal });
+        discState.set(id, { status, note: noteVal });
+        root.querySelectorAll(`[data-disc-badges="${CSS.escape(id)}"]`).forEach(w => { w.innerHTML = discBadgesInner(discState.get(id)); });
+        p.classList.add('hidden');
+        toast('Đã lưu trạng thái xử lí');
+      } catch (e) { alertErr('Không lưu được trạng thái', e.message); }
+      save.disabled = false;
+    };
   });
 }
 /* ---------- Modal chi tiết phiếu gốc (v33 §10) ---------- */
@@ -594,7 +630,7 @@ ADMIN_VIEWS.processing = async () => {
   load();
 };
 
-/* ---------- Đối soát — GIÁM SÁT (ADMIN, v33 §6): POS báo ↔ đã quét theo ngày ---------- */
+/* ---------- Đối soát — GIÁM SÁT (ADMIN, v33 §6 + v34 accordion theo ngày): POS báo ↔ đã quét ---------- */
 ADMIN_VIEWS.recon = async () => {
   const v = $('#view'); v.className = 'view';
   v.innerHTML = `<div id="rcBar"></div><div id="rcBody">Đang tải…</div>`;
@@ -604,15 +640,28 @@ ADMIN_VIEWS.recon = async () => {
     const { from, to } = monRange();
     try {
       const r = await api(`/api/admin/recon-check?from=${from}&to=${to}`);
-      box.innerHTML = r.days.map(d => `<div class="card" style="margin-bottom:12px">
-        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><b>Ngày ${esc(d.date)}</b>
-        <span class="pill">POS báo: ${d.expectedCount}</span><span class="pill">Đã quét: ${d.scannedDistinct} đơn (${d.scannedRows} mã)</span>
-        <span class="pill ${d.missing.length ? 'warn' : ''}">Thiếu: ${d.missing.length}</span><span class="pill ${d.extra.length ? 'warn' : ''}">Thừa: ${d.extra.length}</span><span class="pill ${d.duplicates ? 'warn' : ''}">Quét trùng: ${d.duplicates}</span></div>
-        ${!d.hasExpected ? '<div class="mut" style="margin-top:6px">Chưa có dữ liệu đơn POS cho ngày này (tab ĐƠN_POS_ẨN trống) — chỉ có số đã quét.</div>' : ''}
-        ${d.missingItems.length ? `<div style="margin-top:8px"><b>Đơn còn thiếu:</b>${d.missingItems.map(m => `<div class="disc-row"><span class="pill warn">${esc(m.code)}</span>${discControlHTML(m)}</div>`).join('')}</div>` : ''}
-        ${d.extra.length ? `<div class="mut" style="margin-top:6px">Đơn quét thừa (không có trong danh sách POS): ${d.extra.map(x => esc(x)).join(', ')}</div>` : ''}
-      </div>`).join('') || '<p class="mut">Không có ngày nào trong kỳ.</p>';
-      wireDiscControls(box, load);
+      box.innerHTML = r.days.map((d, idx) => {
+        const open = idx === 0; /* server trả ngày giảm dần: ngày mới nhất mở sẵn, các ngày còn lại thu gọn */
+        return `<div class="card rc-day" style="margin-bottom:12px">
+        <div class="rc-day-head" data-rc-toggle="${idx}" title="Bấm để mở / thu gọn ngày này">
+          <span class="rc-chev">${open ? '▾' : '▸'}</span><b>Ngày ${esc(fmtDateVN(d.date))}</b>
+          <span class="pill">POS báo: ${d.expectedCount}</span><span class="pill">Đã quét: ${d.scannedDistinct} đơn (${d.scannedRows} mã)</span>
+          <span class="pill ${d.missing.length ? 'warn' : ''}">Thiếu: ${d.missing.length}</span><span class="pill ${d.extra.length ? 'warn' : ''}">Thừa: ${d.extra.length}</span><span class="pill ${d.duplicates ? 'warn' : ''}">Quét trùng: ${d.duplicates}</span>
+        </div>
+        <div class="rc-day-body${open ? '' : ' hidden'}" data-rc-body="${idx}">
+          ${!d.hasExpected ? '<div class="mut" style="margin-top:6px">Chưa có dữ liệu đơn POS cho ngày này (tab ĐƠN_POS_ẨN trống) — chỉ có số đã quét.</div>' : ''}
+          ${d.missingItems.length ? `<div style="margin-top:8px"><b>Đơn còn thiếu:</b>${d.missingItems.map(m => `<div class="disc-row"><span class="pill warn">${esc(m.code)}</span>${discCellHTML(m)}</div><div class="disc-panel hidden" data-disc-panel="${esc(m.id)}">${discEditorInnerHTML()}</div>`).join('')}</div>` : ''}
+          ${d.extra.length ? `<div class="mut" style="margin-top:6px">Đơn quét thừa (không có trong danh sách POS): ${d.extra.map(x => esc(x)).join(', ')}</div>` : ''}
+        </div>
+      </div>`;
+      }).join('') || '<p class="mut">Không có ngày nào trong kỳ.</p>';
+      box.querySelectorAll('[data-rc-toggle]').forEach(h => h.onclick = () => {
+        const body = box.querySelector(`[data-rc-body="${h.dataset.rcToggle}"]`);
+        if (!body) return;
+        const nowHidden = body.classList.toggle('hidden');
+        const chev = h.querySelector('.rc-chev'); if (chev) chev.textContent = nowHidden ? '▸' : '▾';
+      });
+      wireDiscCompact(box);
     } catch (e) { box.innerHTML = `<div class="card">${esc(e.message)}</div>`; }
   }
   load();
@@ -629,9 +678,14 @@ ADMIN_VIEWS.stocktake = async () => {
     try {
       const r = await api(`/api/admin/checks?from=${from}&to=${to}`);
       const badge = x => `<span class="badge ${x === 0 ? 'g' : 'r'}">${x > 0 ? '+' : ''}${fmtKg(x)}</span>`;
-      box.innerHTML = r.items.length ? `<div style="overflow-x:auto"><table class="tbl"><tr><th>Phiếu</th><th>Giờ</th><th>Người kiểm</th><th>Sản phẩm</th><th>Tồn sổ</th><th>Đếm thực tế</th><th>Lệch sổ</th><th>Tồn POS</th><th>Lệch POS</th><th>Trạng thái xử lí</th></tr>${r.items.map(i => `<tr><td>${slipLinkHTML(i.slipCode, 'check')}</td><td style="white-space:nowrap">${esc(i.at)}</td><td>${esc(i.user)}</td><td><b>${esc(i.name)}</b><div class="mut">${esc(i.warehouse || '')}</div></td><td>${fmtKg(i.book)}</td><td>${fmtKg(i.counted)}</td><td>${badge(i.varBook)}</td><td>${fmtKg(i.posNow)}</td><td>${badge(i.varPos)}</td><td>${i.varBook !== 0 ? discControlHTML({ id: i.discrepancyId, status: i.status, note: i.note }) : '<span class="pill">Khớp</span>'}</td></tr>`).join('')}</table></div>` : '<p class="mut">Không có dòng kiểm kho nào trong kỳ.</p>';
+      box.innerHTML = r.items.length ? `<div style="overflow-x:auto"><table class="tbl"><tr><th>Phiếu</th><th>Giờ</th><th>Người kiểm</th><th>Sản phẩm</th><th>Tồn sổ</th><th>Đếm thực tế</th><th>Lệch sổ</th><th>Tồn POS</th><th>Lệch POS</th><th>Trạng thái xử lí</th></tr>${r.items.map(i => {
+        const hasDisc = i.varBook !== 0;
+        const row = `<tr><td>${slipLinkHTML(i.slipCode, 'check')}</td><td style="white-space:nowrap">${esc(i.at)}</td><td>${esc(i.user)}</td><td><b>${esc(i.name)}</b><div class="mut">${esc(i.warehouse || '')}</div></td><td>${fmtKg(i.book)}</td><td>${fmtKg(i.counted)}</td><td>${badge(i.varBook)}</td><td>${fmtKg(i.posNow)}</td><td>${badge(i.varPos)}</td><td>${hasDisc ? discCellHTML({ id: i.discrepancyId, status: i.status, note: i.note }) : '<span class="pill">Khớp</span>'}</td></tr>`;
+        const ed = hasDisc ? `<tr class="disc-ed-tr hidden" data-disc-panel="${esc(i.discrepancyId)}"><td colspan="10">${discEditorInnerHTML()}</td></tr>` : '';
+        return row + ed;
+      }).join('')}</table></div>` : '<p class="mut">Không có dòng kiểm kho nào trong kỳ.</p>';
       wireSlipLinks(box);
-      wireDiscControls(box, load);
+      wireDiscCompact(box);
     } catch (e) { box.innerHTML = `<p>${esc(e.message)}</p>`; }
   }
   load();

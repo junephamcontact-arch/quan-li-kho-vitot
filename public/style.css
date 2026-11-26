@@ -302,10 +302,26 @@ html[data-theme="dark"] .act-recon{background:#173626;color:#5fd68a}
 table.tbl tr.clickable{cursor:pointer}
 table.tbl tr.clickable:hover td{background:var(--surface2)}
 .disc-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:7px}
-.disc-ctl{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap}
-.disc-ctl select.in{width:170px;height:32px;font-size:13px}
-.disc-ctl input.in{width:190px;height:32px;font-size:13px}
-.disc-ctl .btn{height:32px}
+.disc-row .disc-dots{margin-left:auto}
+.disc-badges{display:inline-flex;gap:5px;align-items:center}
+.disc-badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:700}
+.disc-badge.open{background:#fdf3e0;color:#9a6a00}
+.disc-badge.explained{background:#e5effe;color:#2f7cf6}
+.disc-badge.resolved{background:#e2f7e9;color:#0e7a3d}
+html[data-theme="dark"] .disc-badge.open{background:#3a2f16;color:#f5c86e}
+html[data-theme="dark"] .disc-badge.explained{background:#1d2f4a;color:#7db4ff}
+html[data-theme="dark"] .disc-badge.resolved{background:#173626;color:#5fd68a}
+.disc-note-ic{font-size:12px;color:var(--muted);cursor:help}
+.disc-dots{height:26px;min-width:30px;padding:0 7px;font-weight:800;line-height:1}
+.disc-panel{margin:2px 0 8px 4px}
+.disc-editor{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap}
+.disc-editor select.in{width:170px;height:32px;font-size:13px}
+.disc-editor input.in{width:190px;height:32px;font-size:13px}
+.disc-editor .btn{height:32px}
+.disc-ed-tr td{background:var(--surface2)}
+.rc-day-head{display:flex;gap:8px;flex-wrap:wrap;align-items:center;cursor:pointer;user-select:none}
+.rc-chev{display:inline-block;width:16px;text-align:center;color:var(--muted);font-size:13px}
+.rc-day-body{margin-top:2px}
 /* Modal chi tiết phiếu: khung VITOT rộng, nội dung cuộn dọc */
 #slipWrap{position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;padding:18px;background:rgba(8,18,12,.45);backdrop-filter:blur(3px);opacity:0;pointer-events:none;transition:opacity .22s}
 #slipWrap.show{opacity:1;pointer-events:auto}
