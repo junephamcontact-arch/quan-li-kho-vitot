@@ -1,5 +1,5 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v24.261126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v25.261126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -242,7 +242,7 @@ VIEWS.dashboard = async () => {
         ${stat(d.slipsInPeriod, 'Phiếu trong kỳ')}
         ${stat(d.reconScanned, 'Đơn đã đối soát')}
         ${stat(d.reconDuplicates, 'Đơn quét trùng')}
-        ${stat(d.unwritten, 'Phiếu chưa ghi Sheet')}
+        ${stat(d.written, 'Đã ghi lên Sheet')}
         ${stat(d.reconWarnings, 'Phiếu kiểm lệch')}
       </div>
       <div class="mut" style="margin-top:6px">Nhập ${d.byType.in} • Xuất ${d.byType.out} • Kiểm ${d.byType.check} • Chế biến ${d.byType.process} • Đối soát ${d.byType.recon} (số phiếu)</div>
@@ -273,12 +273,12 @@ VIEWS.inventory = async () => {
   v.innerHTML = `<div class="card">
     <div class="grid2">
       <div class="field"><label class="f">Kho hàng</label><select class="in" id="invWh"><option value="">Tất cả kho</option>${selOptions(wh, defWh())}</select></div>
-      <div class="field"><label class="f">Tìm kiếm</label><input class="in" id="invQ" placeholder="Tên sản phẩm, SKU, mã vạch…"></div>
+      <div class="field"><label class="f">Tìm kiếm</label><input class="in" id="invQ" placeholder="Tên sản phẩm, mã sản phẩm…"></div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <button class="chip active" data-f="all">Tất cả sản phẩm (<span id="cAll">0</span>)</button>
-      <button class="chip" data-f="available">Còn hàng có thể bán (<span id="cAv">0</span>)</button>
-      <button class="chip" data-f="out">Hết hàng (0) (<span id="cOut">0</span>)</button>
+      <button class="chip" data-f="available">Còn hàng (&gt;0) (<span id="cAv">0</span>)</button>
+      <button class="chip" data-f="out">Hết / âm kho (≤0) (<span id="cOut">0</span>)</button>
       ${S.user.admin ? '<button class="btn" id="invRefresh" style="margin-left:auto">↻ Làm mới từ Sheet</button>' : ''}
     </div>
     <div class="mut" id="invMeta" style="margin-top:10px"></div>
@@ -290,11 +290,11 @@ VIEWS.inventory = async () => {
     if (reset) page = 1;
     const r = await api(`/api/inventory?warehouse=${encodeURIComponent($('#invWh').value)}&q=${encodeURIComponent($('#invQ').value)}&filter=${filter}&page=${page}`);
     $('#cAll').textContent = r.counts.all; $('#cAv').textContent = r.counts.available; $('#cOut').textContent = r.counts.out;
-    $('#invMeta').textContent = r.posUpdatedAt ? `Dữ liệu POS cập nhật lúc: ${r.posUpdatedAt} • Đồng bộ về app: ${r.syncedAt}` : 'Chưa đồng bộ dữ liệu từ Sheet.';
-    const rows = r.items.map(i => `<tr><td><b>${esc(i.name)}</b>${i.variant ? ' — ' + esc(i.variant) : ''}<div class="mut">SKU: ${esc(i.sku)} • ${esc(i.warehouse)}</div></td>
-      <td><span class="badge ${i.sellable > 5 ? 'g' : i.sellable > 0 ? 'y' : 'r'}">${i.sellable}</span></td>
-      <td><span class="badge ${i.stock > 5 ? 'g' : i.stock > 0 ? 'y' : 'r'}">${i.stock}</span></td></tr>`).join('');
-    const html = `<table class="tbl"><tr><th>Sản phẩm</th><th>Có thể bán</th><th>Tồn kho thực tế</th></tr>${rows || '<tr><td colspan="3" class="mut">Không có sản phẩm.</td></tr>'}</table>`;
+    $('#invMeta').textContent = `Tồn theo SỔ KHO do kho tự quản — tính từ các phiếu Nhập/Xuất/Chế biến/Kiểm đã ghi xuống Sheet (không lấy tồn POS). Cập nhật: ${r.syncedAt || '—'}`;
+    const rows = r.items.map(i => `<tr><td><b>${esc(i.name)}</b><div class="mut">Mã: ${esc(i.code) || '—'} • ${esc(i.warehouse)}</div></td>
+      <td>${esc(i.unit) || '—'}</td>
+      <td><span class="badge ${i.stock > 5 ? 'g' : i.stock > 0 ? 'y' : 'r'}">${fmtKg(i.stock)}</span></td></tr>`).join('');
+    const html = `<table class="tbl"><tr><th>Sản phẩm</th><th>ĐVT</th><th>Tồn theo sổ kho</th></tr>${rows || '<tr><td colspan="3" class="mut">Chưa có sản phẩm nào trong sổ kho. Sản phẩm sẽ xuất hiện sau khi có phiếu nhập/xuất/chế biến/kiểm được ghi xuống Sheet.</td></tr>'}</table>`;
     if (reset || page === 1) $('#invList').innerHTML = html; else $('#invList').querySelector('tbody').insertAdjacentHTML('beforeend', rows);
     $('#invMore').classList.toggle('hidden', r.total <= page * 100);
   }
@@ -629,10 +629,30 @@ VIEWS.processing = async () => {
 };
 
 /* ---------- Đối soát đơn (quét mù, GỌN) — súng quét giữ focus; camera quét liên tục QR + mã vạch 1D ---------- */
-function beepOk() {
+/* Âm thanh quét: dùng 1 AudioContext DÙNG CHUNG. Trình duyệt (nhất là iOS/webview Messenger) chặn
+   AudioContext tạo ngoài thao tác chạm — nên phải khởi tạo/resume ngay trong thao tác bấm nút mở
+   camera / bấm Thêm / Enter (ensureAudio), sau đó beepOk chỉ việc phát. Lỗi âm thanh không được làm hỏng luồng quét. */
+let audioCtx = null;
+function ensureAudio() {
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext;
-    if (Ctx) { const ctx = new Ctx(); const o = ctx.createOscillator(); const g = ctx.createGain(); o.connect(g); g.connect(ctx.destination); o.frequency.value = 880; g.gain.setValueAtTime(0.15, ctx.currentTime); g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12); o.start(); o.stop(ctx.currentTime + 0.13); }
+    if (!Ctx) return;
+    if (!audioCtx) audioCtx = new Ctx();
+    if (audioCtx.state === 'suspended') { const p = audioCtx.resume(); if (p && p.catch) p.catch(() => {}); }
+  } catch {}
+}
+function beepOk() {
+  try {
+    ensureAudio();
+    if (audioCtx) {
+      const t0 = audioCtx.currentTime;
+      const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+      o.connect(g); g.connect(audioCtx.destination);
+      o.type = 'square'; o.frequency.value = 880;
+      g.gain.setValueAtTime(0.18, t0);
+      g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.15);
+      o.start(t0); o.stop(t0 + 0.16);
+    }
   } catch {}
   try { if (navigator.vibrate) navigator.vibrate(70); } catch {}
 }
@@ -669,7 +689,10 @@ VIEWS.recon = async () => {
   function refreshList() {
     $('#rCount').textContent = S.reconCodes.length;
     $('#rTotal').textContent = S.reconCodes.length;
-    listBox.innerHTML = S.reconCodes.map((c, i) => `<div class="recon-row"><span class="pill">${i + 1}</span><div class="grow" style="flex:1;min-width:0"><b>${esc(c)}</b></div><button class="icon-btn" data-i="${i}">✕</button></div>`).join('') || '<p class="mut" style="margin:4px 0">Chưa quét đơn nào.</p>';
+    // Mã xuất hiện ≥2 lần = TRÙNG → mọi chip của mã đó nền đỏ cho dễ nhận biết
+    const counts = {};
+    S.reconCodes.forEach(c => counts[c] = (counts[c] || 0) + 1);
+    listBox.innerHTML = S.reconCodes.map((c, i) => `<span class="recon-chip${counts[c] > 1 ? ' dup' : ''}"><span class="rc-n">${i + 1}</span><b>${esc(c)}</b><button class="rc-x" data-i="${i}" title="Xoá mã này">✕</button></span>`).join('') || '<p class="mut" style="margin:4px 0">Chưa quét đơn nào.</p>';
     listBox.querySelectorAll('[data-i]').forEach(b => b.onclick = () => { S.reconCodes.splice(+b.dataset.i, 1); refreshList(); input.focus(); });
   }
   function focusInput() { setTimeout(() => { if (S.view === 'recon') input.focus(); }, 30); }
@@ -687,7 +710,7 @@ VIEWS.recon = async () => {
     }
     S.reconCodes.push(c); refreshList(); beepOk(); focusInput();
   }
-  function addFromInput() { const c = input.value; input.value = ''; handleCode(c); }
+  function addFromInput() { ensureAudio(); const c = input.value; input.value = ''; handleCode(c); }
   $('#rAdd').onclick = addFromInput;
   input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addFromInput(); } });
   input.addEventListener('blur', () => { setTimeout(() => { if (S.view === 'recon' && !S.reconBusy && !camOn) input.focus(); }, 250); });
@@ -709,6 +732,7 @@ VIEWS.recon = async () => {
   }
   function loadScript(src) { return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); }); }
   $('#rScan').onclick = async () => {
+    ensureAudio(); // mở khoá âm thanh ngay trong thao tác chạm (trình duyệt chặn AudioContext ngoài cử chỉ người dùng)
     if (camOn) { stopCam(); return; }
     const video = $('#rVideo');
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return alertWarn('Thiết bị không hỗ trợ camera', 'Trình duyệt này không mở được camera. Bạn vẫn quét được bằng máy quét mã vạch hoặc gõ tay mã đơn.');
