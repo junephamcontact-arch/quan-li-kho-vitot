@@ -303,6 +303,10 @@ function buildCanon() {
   }
   return canon;
 }
+/* Chuẩn hoá TÊN sản phẩm cho định danh: trim + gộp khoảng trắng thừa + không phân biệt hoa thường */
+function normProdName(s) { return String(s || '').trim().replace(/\s+/g, ' ').toLowerCase(); }
+/* Tên hiển thị: giữ hoa thường như ghi trên phiếu, chỉ gọn khoảng trắng */
+function dispProdName(s) { return String(s || '').trim().replace(/\s+/g, ' '); }
 function computeWarehouseStock() {
   const canon = buildCanon();
   const canonCode = code => canon.get(code) || code || '';
@@ -310,12 +314,15 @@ function computeWarehouseStock() {
   const map = new Map();
   const entry = (wh, code, name, unit) => {
     const c = canonCode(String(code || '').trim());
-    const pk = c || ('name:' + String(name || '').trim().toLowerCase());
+    // ĐỊNH DANH sản phẩm = mã đã chuẩn hoá + TÊN ghi trên dòng phiếu (đã chuẩn hoá):
+    // cùng mã nhưng KHÁC TÊN là 2 sản phẩm khác nhau — tuyệt đối không cộng gộp vào nhau
+    // (đã từng xảy ra trên dữ liệu thật: "Càng Cua" mã mẫu 1 và "Su Hào (Củ)" mã mẫu 1 bị gộp thành 1 dòng).
+    const pk = c + '\u0002' + normProdName(name);
     const k = (wh || '') + '\u0001' + pk;
     let e = map.get(k);
     if (!e) {
       e = {
-        warehouse: wh || '', code: c, name: String(name || '').trim(), unit: unit || '', stock: 0,
+        warehouse: wh || '', code: c, name: dispProdName(name), unit: unit || '', stock: 0,
         // Số liệu TỔNG HỢP theo mã (gộp mọi phiếu): totalIn = tổng SL đã nhập qua mọi phiếu Nhập;
         // totalOut = tổng SL xuất kho + nguyên liệu đưa vào chế biến; processIn = thành phẩm chế biến nhập lại kho;
         // checkAdj = tổng điều chỉnh do kiểm kho (ĐẶT tồn = số đếm). Hằng đẳng thức: stock = totalIn − totalOut + processIn + checkAdj.
@@ -325,7 +332,7 @@ function computeWarehouseStock() {
       };
       map.set(k, e);
     }
-    if (name) e.name = String(name).trim();
+    if (name) e.name = dispProdName(name);
     if (unit) e.unit = unit;
     return e;
   };
@@ -377,11 +384,14 @@ function computeWarehouseStock() {
 function warehouseEntries() {
   return computeWarehouseStock().filter(e => e.fromInbound);
 }
-/* Tồn sổ kho hiện tại của 1 mã tại 1 kho (dùng làm "tồn hệ thống" dự phòng cho phiếu kiểm khi không tra được POS) */
-function ledgerBalanceOf(warehouse, code) {
+/* Tồn sổ kho hiện tại của 1 sản phẩm tại 1 kho (dùng làm "tồn hệ thống" dự phòng cho phiếu kiểm khi không tra được POS).
+   Định danh theo mã + TÊN như dataset kho: có tên thì khớp đúng dòng mang tên đó; không có tên thì lấy dòng đầu tiên theo mã. */
+function ledgerBalanceOf(warehouse, code, name) {
   const c = buildCanon().get(code) || code || '';
-  const e = computeWarehouseStock().find(x => x.warehouse === (warehouse || '') && x.code === c);
-  return e ? e.stock : 0;
+  const list = computeWarehouseStock().filter(x => x.warehouse === (warehouse || '') && x.code === c);
+  if (!list.length) return 0;
+  if (name) { const m = list.find(x => normProdName(x.name) === normProdName(name)); if (m) return m.stock; }
+  return list[0].stock;
 }
 
 /* Tóm tắt sổ kho cho chip "Tồn kho" + đầu màn Tra cứu: tổng số lượng THỰC TẾ còn trong kho
@@ -667,16 +677,20 @@ async function createSlip(user, body) {
     slip.expectedKey = parseDateKey(slip.expectedDate);
     for (const l of linesIn) {
       const item = itemOf(l);
-      const line = { key: l.key || '', name: l.name || (item ? item.name : ''), variant: l.variant || (item ? item.variant : ''), sampleCode: item ? item.sampleCode : (l.sampleCode || ''), qty: Number(l.qty) || 0, unit: l.unit || '' };
+      // Tên lưu trên dòng phiếu = đúng nhãn ghi xuống Sheet (tên + biến thể) — để phiếu trong bộ nhớ
+      // khớp tuyệt đối với bản đọc ngược từ Sheet, vì định danh dataset kho gồm cả TÊN.
+      const label = productLabel(l, item);
+      const line = { key: l.key || '', name: label, variant: '', sampleCode: item ? item.sampleCode : (l.sampleCode || ''), qty: Number(l.qty) || 0, unit: l.unit || '' };
       slip.lines.push(line);
-      rows.push([code, slip.warehouse, slip.supplier, dt, slip.expectedDate, productLabel(line, item), line.sampleCode, line.qty, line.unit, slip.checker, '']);
+      rows.push([code, slip.warehouse, slip.supplier, dt, slip.expectedDate, label, line.sampleCode, line.qty, line.unit, slip.checker, '']);
     }
   } else if (type === 'out') {
     for (const l of linesIn) {
       const item = itemOf(l);
-      const line = { key: l.key || '', name: l.name || (item ? item.name : ''), variant: l.variant || (item ? item.variant : ''), sampleCode: item ? item.sampleCode : (l.sampleCode || ''), qty: Number(l.qty) || 0, unit: l.unit || '', note: String(l.note || '').trim() };
+      const label = productLabel(l, item);
+      const line = { key: l.key || '', name: label, variant: '', sampleCode: item ? item.sampleCode : (l.sampleCode || ''), qty: Number(l.qty) || 0, unit: l.unit || '', note: String(l.note || '').trim() };
       slip.lines.push(line);
-      rows.push([code, slip.warehouse, slip.exportType, slip.recipient, dt, productLabel(line, item), line.sampleCode, line.qty, line.unit, line.note || slip.note, user.name, '', '', '']);
+      rows.push([code, slip.warehouse, slip.exportType, slip.recipient, dt, label, line.sampleCode, line.qty, line.unit, line.note || slip.note, user.name, '', '', '']);
     }
   } else if (type === 'check') {
     for (const l of linesIn) {
@@ -684,13 +698,14 @@ async function createSlip(user, body) {
       // "Tồn hệ thống" đối chiếu: ưu tiên tồn POS khi tra được theo key; picker kho không tra được POS
       // thì lấy tồn SỔ KHO hiện tại của mã đó (thay vì 0 như trước — 0 làm sai lệch cột chênh lệch trên Sheet).
       const lineCode = item ? item.sampleCode : (l.sampleCode || '');
-      const systemStock = item ? item.stock : ledgerBalanceOf(slip.warehouse, lineCode);
+      const systemStock = item ? item.stock : ledgerBalanceOf(slip.warehouse, lineCode, l.name || '');
       const counted = Number(l.counted) || 0;
       const variance = counted - systemStock;
       const matchStatus = variance === 0 ? 'Khớp' : (variance > 0 ? 'Thừa' : 'Thiếu');
-      slip.lines.push({ key: l.key || '', name: l.name || (item ? item.name : ''), variant: l.variant || (item ? item.variant : ''), sampleCode: item ? item.sampleCode : (l.sampleCode || ''), counted, systemStock, variance, matchStatus });
+      const label = productLabel(l, item);
+      slip.lines.push({ key: l.key || '', name: label, variant: '', sampleCode: item ? item.sampleCode : (l.sampleCode || ''), counted, systemStock, variance, matchStatus });
       const statusText = variance === 0 ? '✅ Khớp' : `⚠️ ${matchStatus} ${variance > 0 ? '+' : ''}${variance}`;
-      rows.push([code, slip.warehouse, dt, slip.lines[slip.lines.length - 1].sampleCode, productLabel(l, item), systemStock, counted, variance, slip.note, user.name, statusText, '', '']);
+      rows.push([code, slip.warehouse, dt, slip.lines[slip.lines.length - 1].sampleCode, label, systemStock, counted, variance, slip.note, user.name, statusText, '', '']);
     }
   } else if (type === 'process') {
     for (const l of linesIn) {
@@ -707,9 +722,10 @@ async function createSlip(user, body) {
       const reason = String(l.reason || '').trim();
       // Cột P "Lý do hủy / Ghi chú" chứa cả lý do hủy + ghi chú của phiếu
       const noteCell = [reason ? 'Lý do hủy: ' + reason : '', slip.note].filter(Boolean).join(' • ');
-      const line = { key: l.key || '', name: l.name || (item ? item.name : ''), variant: l.variant || (item ? item.variant : ''), sampleCode: item ? item.sampleCode : (l.sampleCode || ''), unit: l.unit || '', inputQty, usable, discard, loss, usablePct: inputQty ? +(usable / inputQty * 100).toFixed(1) : 0, discardPct: inputQty ? +(discard / inputQty * 100).toFixed(1) : 0, lossPct: inputQty ? +(loss / inputQty * 100).toFixed(1) : 0, finishedSku, finishedName, posQty, reason };
+      const label = productLabel(l, item);
+      const line = { key: l.key || '', name: label, variant: '', sampleCode: item ? item.sampleCode : (l.sampleCode || ''), unit: l.unit || '', inputQty, usable, discard, loss, usablePct: inputQty ? +(usable / inputQty * 100).toFixed(1) : 0, discardPct: inputQty ? +(discard / inputQty * 100).toFixed(1) : 0, lossPct: inputQty ? +(loss / inputQty * 100).toFixed(1) : 0, finishedSku, finishedName, posQty, reason };
       slip.lines.push(line);
-      rows.push([code, slip.warehouse, dt, item ? (item.sku || item.sampleCode) : (l.sampleCode || ''), productLabel(line, item), inputQty, finishedSku, finishedName, posQty ? posQty : '', usable, discard, loss, line.usablePct, line.discardPct, line.lossPct, noteCell, user.name, '']);
+      rows.push([code, slip.warehouse, dt, item ? (item.sku || item.sampleCode) : (l.sampleCode || ''), label, inputQty, finishedSku, finishedName, posQty ? posQty : '', usable, discard, loss, line.usablePct, line.discardPct, line.lossPct, noteCell, user.name, '']);
     }
   } else if (type === 'recon') {
     // Cho phép quét TRÙNG: mỗi lượt quét là 1 dòng (client đã hỏi xác nhận trước khi thêm dòng trùng)
@@ -784,7 +800,7 @@ async function api(req, res, url) {
     return send(res, 200, { items });
   }
 
-  /* "Sản phẩm của kho" — dataset TỔNG HỢP từ các phiếu NHẬP đã ghi (gộp theo mã, 1 dòng/mã/kho):
+  /* "Sản phẩm của kho" — dataset TỔNG HỢP từ các phiếu NHẬP đã ghi (gộp theo mã + TÊN, 1 dòng/định danh/kho):
      nguồn cho Tra cứu + picker Xuất / Kiểm / Chế biến (nguyên liệu) + thông tin tham khảo ở Nhập.
      blind=1: chỉ trả tên + mã (kiểm kho mù — không lộ bất kỳ con số nào). */
   if (p === '/api/warehouse-products') {
@@ -796,10 +812,16 @@ async function api(req, res, url) {
     if (q) items = items.filter(i => (i.name + ' ' + i.code).toLowerCase().includes(q));
     items.sort((a, b) => a.name.localeCompare(b.name, 'vi'));
     const out = items.map(e => {
-      const pos = state.inventory.items.find(i => (i.sampleCode || i.sku) === e.code && i.warehouse === e.warehouse)
-        || state.inventory.items.find(i => (i.sampleCode || i.sku) === e.code);
+      // Liên kết ngược về POS: ưu tiên khớp cả MÃ + TÊN (cùng mã khác tên là 2 sản phẩm khác nhau),
+      // rồi mới tới mã + kho, cuối cùng là mã thuần như trước.
+      const sameCode = i => (i.sampleCode || i.sku) === e.code;
+      const sameName = i => normProdName(productLabel(i, null)) === normProdName(e.name);
+      const pos = state.inventory.items.find(i => sameCode(i) && sameName(i) && i.warehouse === e.warehouse)
+        || state.inventory.items.find(i => sameCode(i) && sameName(i))
+        || state.inventory.items.find(i => sameCode(i) && i.warehouse === e.warehouse)
+        || state.inventory.items.find(sameCode);
       const base = {
-        key: 'wh:' + e.warehouse + '\u0001' + (e.code || e.name),
+        key: 'wh:' + e.warehouse + '\u0001' + e.code + '\u0001' + normProdName(e.name),
         warehouse: e.warehouse, code: e.code, name: e.name, unit: e.unit,
         category: pos ? pos.category : '', posKey: pos ? pos.key : ''
       };
