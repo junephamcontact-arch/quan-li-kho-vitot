@@ -1,5 +1,5 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v25.261126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v27.261126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -36,7 +36,7 @@ function fmtAutoTime(d) {
 const fmtKg = n => (Math.round((Number(n) || 0) * 100) / 100).toLocaleString('vi-VN');
 
 /* ---------- Trạng thái ---------- */
-let S = { token: localStorage.getItem('qk-token') || '', user: null, boot: null, products: [], view: '', slipLines: [], reconCodes: [], reconBusy: false, dashPreset: 'today', dashFrom: '', dashTo: '', calY: 0, calM: 0, calSel: '', calData: { arrivals: [], events: [] } };
+let S = { token: localStorage.getItem('qk-token') || '', user: null, boot: null, products: [], whProducts: [], view: '', slipLines: [], reconCodes: [], reconBusy: false, dashPreset: 'today', dashFrom: '', dashTo: '', calY: 0, calM: 0, calSel: '', calData: { arrivals: [], events: [] } };
 
 async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + S.token, ...(opts.headers || {}) } });
@@ -124,11 +124,18 @@ function buildNav() {
   $('#footName').textContent = S.user.name;
   $('#footRole').textContent = S.user.role;
 }
+/* Chip "Tồn kho" trên thanh đầu: hiển thị tồn THỰC TẾ theo SỔ KHO (từ bootstrap.warehouseStock),
+   KHÔNG dùng số sản phẩm đồng bộ POS nữa. Chưa có dữ liệu sổ kho → "Tồn kho: 0". */
+function whBadgeText(ws) {
+  if (!ws || (!ws.totalQty && !ws.productCount)) return 'Tồn kho: 0';
+  return `Tồn kho: ${fmtKg(ws.totalQty)} (${ws.productCount} SP)`;
+}
+function setInvBadge() { const b = $('#invBadge'); if (b) b.textContent = whBadgeText(S.boot && S.boot.warehouseStock); }
 async function enterApp() {
   const me = await api('/api/me'); S.user = me.user;
   S.boot = await api('/api/bootstrap');
   $('#loginWrap').classList.add('hidden'); $('#app').classList.remove('hidden');
-  $('#invBadge').textContent = S.boot.inventoryMeta.count ? `Tồn kho: ${S.boot.inventoryMeta.count} SP` : '';
+  setInvBadge();
   go(S.user.admin ? 'dashboard' : (NAV.find(([k]) => k !== 'settings' && S.user.perms[k]) || ['settings'])[0]);
 }
 function go(view) { S.view = view; S.slipLines = []; S.reconCodes = []; S.reconBusy = false; buildNav(); $('#viewTitle').textContent = t(view); VIEWS[view](); window.scrollTo(0, 0); }
@@ -152,18 +159,33 @@ async function loadProducts(blind) {
   const r = await api('/api/products' + (blind ? '?blind=1' : ''));
   S.products = r.items; return r.items;
 }
-/* Ô chọn sản phẩm dạng dropdown tìm kiếm; onPick(item). opts.emptyMsg: thông điệp khi không tìm thấy */
+/* "Sản phẩm của kho" — dataset tổng hợp từ phiếu Nhập (server /api/warehouse-products).
+   blind=1: server chỉ trả tên + mã (kiểm kho mù). */
+async function loadWhProducts(blind) {
+  const r = await api('/api/warehouse-products' + (blind ? '?blind=1' : ''));
+  S.whProducts = r.items; return r.items;
+}
+/* Cách hiển thị 1 dòng trong picker sản phẩm-của-kho: kèm tồn thực tế; bản mù chỉ tên + mã */
+const whItemHtml = p => `<span class="nm">${esc(p.name)}</span><span class="meta">Mã ${esc(p.code || '')} • Tồn: ${fmtKg(p.balance)}</span>`;
+const whBlindHtml = p => `<span class="nm">${esc(p.name)}</span><span class="meta">${esc(p.code || '')}</span>`;
+/* Ô chọn sản phẩm dạng dropdown tìm kiếm; onPick(item). opts:
+   - items: nguồn dữ liệu thay cho S.products (vd S.whProducts); itemHtml(p): tuỳ biến hiển thị 1 dòng
+   - warehouse: chuỗi hoặc HÀM trả chuỗi (lọc theo kho đang chọn trên form, đọc lại mỗi lần mở danh sách)
+   - emptyMsg: thông điệp khi không tìm thấy */
 function productPicker(inputEl, listEl, opts, onPick) {
   opts = opts || {};
   function render(q) {
-    const items = S.products.filter(p => !opts.warehouse || p.warehouse === opts.warehouse)
-      .filter(p => !q || (p.name + ' ' + (p.variant || '') + ' ' + (p.sku || '') + ' ' + (p.barcode || '')).toLowerCase().includes(q.toLowerCase()))
+    const src = opts.items || S.products;
+    const whF = typeof opts.warehouse === 'function' ? opts.warehouse() : opts.warehouse;
+    const items = src.filter(p => !whF || p.warehouse === whF)
+      .filter(p => !q || (p.name + ' ' + (p.variant || '') + ' ' + (p.sku || '') + ' ' + (p.code || '') + ' ' + (p.sampleCode || '') + ' ' + (p.barcode || '')).toLowerCase().includes(q.toLowerCase()))
       .slice(0, 40);
     listEl.innerHTML = items.length ? '' : `<div class="mut" style="padding:10px;line-height:1.5">${esc(opts.emptyMsg || 'Không tìm thấy sản phẩm.')}</div>`;
     listEl.classList.remove('hidden');
     for (const p of items) {
       const b = document.createElement('button');
-      b.innerHTML = opts.blind
+      b.innerHTML = opts.itemHtml ? opts.itemHtml(p)
+        : opts.blind
         ? `<span class="nm">${esc(p.name)}${p.variant ? ' — ' + esc(p.variant) : ''}</span><span class="meta">${esc(p.sampleCode || '')}</span>`
         : `<span class="nm">${esc(p.name)}${p.variant ? ' — ' + esc(p.variant) : ''}</span><span class="meta">Tồn: ${p.stock} • Bán: ${p.sellable}</span>`;
       b.onclick = () => { listEl.classList.add('hidden'); inputEl.value = ''; onPick(p); };
@@ -282,6 +304,7 @@ VIEWS.inventory = async () => {
       ${S.user.admin ? '<button class="btn" id="invRefresh" style="margin-left:auto">↻ Làm mới từ Sheet</button>' : ''}
     </div>
     <div class="mut" id="invMeta" style="margin-top:10px"></div>
+    <div class="inv-summary" id="invSummary"></div>
     <div id="invList" style="margin-top:6px"></div>
     <div style="text-align:center;margin-top:10px"><button class="btn hidden" id="invMore">Xem thêm</button></div>
   </div>`;
@@ -290,11 +313,14 @@ VIEWS.inventory = async () => {
     if (reset) page = 1;
     const r = await api(`/api/inventory?warehouse=${encodeURIComponent($('#invWh').value)}&q=${encodeURIComponent($('#invQ').value)}&filter=${filter}&page=${page}`);
     $('#cAll').textContent = r.counts.all; $('#cAv').textContent = r.counts.available; $('#cOut').textContent = r.counts.out;
-    $('#invMeta').textContent = `Tồn theo SỔ KHO do kho tự quản — tính từ các phiếu Nhập/Xuất/Chế biến/Kiểm đã ghi xuống Sheet (không lấy tồn POS). Cập nhật: ${r.syncedAt || '—'}`;
-    const rows = r.items.map(i => `<tr><td><b>${esc(i.name)}</b><div class="mut">Mã: ${esc(i.code) || '—'} • ${esc(i.warehouse)}</div></td>
+    $('#invMeta').textContent = `Sản phẩm của kho — TỔNG HỢP theo mã từ mọi phiếu Nhập đã ghi (1 mã nhập nhiều lần chỉ hiện 1 dòng). "Tổng đã xuất" gồm xuất kho + nguyên liệu đưa vào chế biến; "Tồn thực tế" đã gồm thành phẩm chế biến nhập lại và điều chỉnh sau kiểm kho. Cập nhật: ${r.syncedAt || '—'}`;
+    if (r.summary) $('#invSummary').innerHTML = `Tổng tồn thực tế trong kho: <b>${fmtKg(r.summary.totalQty)}</b> &nbsp;•&nbsp; <b>${r.summary.productCount}</b> mặt hàng đang có tồn <span class="mut">(theo sổ kho${$('#invWh').value ? ' của kho đang chọn' : ''})</span>`;
+    const rows = r.items.map(i => `<tr><td>${esc(i.code) || '—'}</td><td><b>${esc(i.name)}</b><div class="mut">${esc(i.warehouse)}</div></td>
       <td>${esc(i.unit) || '—'}</td>
+      <td>${fmtKg(i.totalIn)}</td>
+      <td>${fmtKg(i.totalOut)}</td>
       <td><span class="badge ${i.stock > 5 ? 'g' : i.stock > 0 ? 'y' : 'r'}">${fmtKg(i.stock)}</span></td></tr>`).join('');
-    const html = `<table class="tbl"><tr><th>Sản phẩm</th><th>ĐVT</th><th>Tồn theo sổ kho</th></tr>${rows || '<tr><td colspan="3" class="mut">Chưa có sản phẩm nào trong sổ kho. Sản phẩm sẽ xuất hiện sau khi có phiếu nhập/xuất/chế biến/kiểm được ghi xuống Sheet.</td></tr>'}</table>`;
+    const html = `<table class="tbl"><tr><th>Mã SP</th><th>Sản phẩm</th><th>ĐVT</th><th>Tổng đã nhập</th><th>Tổng đã xuất</th><th>Tồn thực tế (sổ kho)</th></tr>${rows || '<tr><td colspan="6" class="mut">Chưa có sản phẩm nào trong kho. Sản phẩm chỉ xuất hiện tại đây sau khi đã có phiếu NHẬP ghi xuống Sheet (kho độc lập — không lấy danh mục/tồn của POS).</td></tr>'}</table>`;
     if (reset || page === 1) $('#invList').innerHTML = html; else $('#invList').querySelector('tbody').insertAdjacentHTML('beforeend', rows);
     $('#invMore').classList.toggle('hidden', r.total <= page * 100);
   }
@@ -302,14 +328,14 @@ VIEWS.inventory = async () => {
   $('#invWh').onchange = () => load(true);
   $$('#view .chip').forEach(c => c.onclick = () => { $$('#view .chip').forEach(x => x.classList.remove('active')); c.classList.add('active'); filter = c.dataset.f; load(true); });
   $('#invMore').onclick = () => { page++; load(false); };
-  const rf = $('#invRefresh'); if (rf) rf.onclick = async () => { try { const r = await post('/api/sheet-sync'); S.boot.inventoryMeta = { count: r.count, syncedAt: r.syncedAt, posUpdatedAt: r.posUpdatedAt }; $('#invBadge').textContent = `Tồn kho: ${r.count} SP`; await notifySyncDone(r); load(true); } catch (e) { alertErr('Đồng bộ thất bại', e.message); } };
+  const rf = $('#invRefresh'); if (rf) rf.onclick = async () => { try { const r = await post('/api/sheet-sync'); S.boot.inventoryMeta = { count: r.count, syncedAt: r.syncedAt, posUpdatedAt: r.posUpdatedAt }; if (r.warehouseStock) { S.boot.warehouseStock = r.warehouseStock; setInvBadge(); } await notifySyncDone(r); load(true); } catch (e) { alertErr('Đồng bộ thất bại', e.message); } };
   load(true);
 };
 
 /* ---------- Xuất hàng (2 cột; phân loại do ADMIN tuỳ chỉnh trong Cài đặt) ---------- */
 VIEWS.outbound = async () => {
   const v = $('#view'); v.className = 'view';
-  await loadProducts(false);
+  await loadWhProducts(false); // picker xuất chỉ gồm SẢN PHẨM CỦA KHO (đã từng nhập) — không lấy danh mục POS nữa
   const L = S.boot.lists;
   const cats = (S.boot.exportCategories && S.boot.exportCategories.length) ? S.boot.exportCategories : ['Bán hàng'];
   const catIcon = name => /bán/i.test(name) ? '🛒' : /chuyển/i.test(name) ? '🔄' : /trả/i.test(name) ? '↩️' : /hủy|huỷ/i.test(name) ? '🗑️' : '📦';
@@ -359,8 +385,8 @@ VIEWS.outbound = async () => {
       rowsBox.querySelectorAll('[data-d]').forEach(b => b.onclick = () => { S.slipLines.splice(+b.dataset.d, 1); renderRows(); });
     }
   }
-  productPicker($('#outPick'), $('#outPickList'), {}, p => {
-    S.slipLines.push({ key: p.key, name: p.name, variant: p.variant, sampleCode: p.sampleCode, warehouse: p.warehouse, unit: 'Kg', qty: '', note: '' });
+  productPicker($('#outPick'), $('#outPickList'), { items: S.whProducts, itemHtml: whItemHtml, warehouse: () => $('#outWh').value, emptyMsg: 'Không thấy sản phẩm trong kho đang chọn. Chỉ xuất được sản phẩm kho ĐÃ TỪNG NHẬP — nếu chưa nhập lần nào, hãy tạo phiếu Nhập hàng trước.' }, p => {
+    S.slipLines.push({ key: p.posKey || '', name: p.name, variant: '', sampleCode: p.code, warehouse: p.warehouse, unit: p.unit || 'Kg', qty: '', note: '' });
     renderRows();
   });
   renderRows();
@@ -381,7 +407,8 @@ VIEWS.outbound = async () => {
 /* ---------- Nhập hàng (2 cột; danh mục gốc là POS — không tạo sản phẩm trong app) ---------- */
 VIEWS.inbound = async () => {
   const v = $('#view'); v.className = 'view';
-  await loadProducts(false);
+  await loadProducts(false); // picker Nhập GIỮ danh mục POS — đây là cổng đưa mã MỚI vào kho
+  await loadWhProducts(false); // dataset kho: chỉ để hiện thông tin tham khảo "đã nhập tổng / tồn hiện tại" cho mã đã từng nhập
   const L = S.boot.lists;
   v.innerHTML = `
   <div class="in-grid">
@@ -414,6 +441,16 @@ VIEWS.inbound = async () => {
   </div>`;
   const clock = setInterval(() => { const el = $('#inCreated'); if (!el || S.view !== 'inbound') { clearInterval(clock); return; } el.value = fmtAutoTime(new Date()); }, 20000);
   const rowsBox = $('#inRows');
+  /* Thông tin tham khảo từ dataset kho cho 1 mã: ưu tiên đúng kho đang chọn trên phiếu, không có thì cộng mọi kho */
+  function whInfo(code) {
+    if (!code) return null;
+    let es = S.whProducts.filter(w => w.code === code);
+    if (!es.length) return null;
+    const sel = $('#inWh') ? $('#inWh').value : '';
+    const inSel = es.filter(w => w.warehouse === sel);
+    if (inSel.length) es = inSel;
+    return { totalIn: es.reduce((a, e) => a + (Number(e.totalIn) || 0), 0), balance: es.reduce((a, e) => a + (Number(e.balance) || 0), 0) };
+  }
   function foot() {
     $('#inCnt').textContent = S.slipLines.length + ' mã';
     const tot = S.slipLines.reduce((a, l) => a + (Number(l.qty) || 0), 0);
@@ -423,13 +460,13 @@ VIEWS.inbound = async () => {
     if (!S.slipLines.length) {
       rowsBox.innerHTML = `<tr><td colspan="6"><div class="in-empty"><span class="box">📦</span>Chưa có sản phẩm nào trong phiếu nhập<div class="sub">Gõ tên sản phẩm hoặc mã mẫu vào ô tìm kiếm phía trên</div></div></td></tr>`;
     } else {
-      rowsBox.innerHTML = S.slipLines.map((l, i) => `<tr>
+      rowsBox.innerHTML = S.slipLines.map((l, i) => { const wi = whInfo(l.whCode); return `<tr>
         <td>${i + 1}</td>
         <td>${esc(l.sampleCode || '')}</td>
-        <td><b>${esc(l.name)}</b>${l.variant ? ' — ' + esc(l.variant) : ''}</td>
+        <td><b>${esc(l.name)}</b>${l.variant ? ' — ' + esc(l.variant) : ''}${wi ? `<div class="mut">Đã nhập tổng: ${fmtKg(wi.totalIn)} · Tồn kho hiện tại: ${fmtKg(wi.balance)}</div>` : ''}</td>
         <td><input class="in" type="number" min="0" step="0.01" value="${l.qty ?? ''}" data-q="${i}" placeholder="0"></td>
         <td><select class="in" data-u="${i}">${L.units.map(u => `<option ${u === l.unit ? 'selected' : ''}>${esc(u)}</option>`).join('')}</select></td>
-        <td><button class="icon-btn" data-d="${i}" title="Xoá">✕</button></td></tr>`).join('');
+        <td><button class="icon-btn" data-d="${i}" title="Xoá">✕</button></td></tr>`; }).join('');
       rowsBox.querySelectorAll('[data-q]').forEach(inp => inp.oninput = () => { S.slipLines[+inp.dataset.q].qty = inp.value; foot(); });
       rowsBox.querySelectorAll('[data-u]').forEach(s => s.onchange = () => { S.slipLines[+s.dataset.u].unit = s.value; });
       rowsBox.querySelectorAll('[data-d]').forEach(b => b.onclick = () => { S.slipLines.splice(+b.dataset.d, 1); renderRows(); });
@@ -437,9 +474,10 @@ VIEWS.inbound = async () => {
     foot();
   }
   productPicker($('#inPick'), $('#inPickList'), { emptyMsg: 'Không tìm thấy sản phẩm trong danh mục. Danh mục gốc nằm trên POS — hãy báo quản lí thêm sản phẩm trên POS trước; sau khi POS đổ dữ liệu về Sheet và app đồng bộ lại, sản phẩm sẽ xuất hiện tại đây. App không tự tạo sản phẩm.' }, p => {
-    S.slipLines.push({ key: p.key, name: p.name, variant: p.variant, sampleCode: p.sampleCode, warehouse: p.warehouse, unit: 'Kg', qty: '' });
+    S.slipLines.push({ key: p.key, name: p.name, variant: p.variant, sampleCode: p.sampleCode, whCode: p.sampleCode || p.sku || '', warehouse: p.warehouse, unit: 'Kg', qty: '' });
     renderRows();
   });
+  $('#inWh').onchange = () => renderRows(); // đổi kho → cập nhật lại thông tin "đã nhập tổng / tồn" theo kho đang chọn
   renderRows();
   $('#inSubmit').onclick = async () => {
     if (!$('#inWh').value) return alertWarn('Chưa chọn kho hàng', 'Vui lòng chọn kho hàng trước khi tạo phiếu.');
@@ -458,10 +496,10 @@ VIEWS.inbound = async () => {
 /* ---------- Kiểm kho (MÙ) — bố cục 2 cột như Xuất, màu nhấn tím ---------- */
 VIEWS.stocktake = async () => {
   const v = $('#view'); v.className = 'view';
-  await loadProducts(true); // blind=1: server chỉ trả tên + mã mẫu
+  await loadWhProducts(true); // blind=1: server chỉ trả tên + mã của SẢN PHẨM CỦA KHO (đã từng nhập) — kiểm mù, không lộ số nào
   const L = S.boot.lists;
-  const cats = [...new Set(S.products.map(p => p.category).filter(Boolean))];
-  const allBlind = [...S.products];
+  const cats = [...new Set(S.whProducts.map(p => p.category).filter(Boolean))];
+  const allBlind = [...S.whProducts];
   v.innerHTML = `
   <div class="in-grid">
     <div class="card">
@@ -507,11 +545,12 @@ VIEWS.stocktake = async () => {
       rowsBox.querySelectorAll('[data-d]').forEach(b => b.onclick = () => { S.slipLines.splice(+b.dataset.d, 1); renderRows(); });
     }
   }
-  productPicker($('#kPick'), $('#kPickList'), { blind: true, emptyMsg: 'Không tìm thấy sản phẩm trong danh mục.' }, p => {
-    if (S.slipLines.some(l => l.key === p.key)) return toast('Sản phẩm đã có trong danh sách kiểm.');
-    S.slipLines.push({ key: p.key, name: p.name, variant: p.variant, sampleCode: p.sampleCode, counted: '' }); renderRows();
+  const kOpts = { items: allBlind, itemHtml: whBlindHtml, warehouse: () => $('#kWh').value, emptyMsg: 'Không thấy sản phẩm trong kho đang chọn. Chỉ kiểm được sản phẩm kho ĐÃ TỪNG NHẬP — mã chưa nhập lần nào sẽ không có trong danh sách kiểm.' };
+  productPicker($('#kPick'), $('#kPickList'), kOpts, p => {
+    if (S.slipLines.some(l => l.sampleCode === p.code)) return toast('Sản phẩm đã có trong danh sách kiểm.');
+    S.slipLines.push({ key: p.posKey || '', name: p.name, variant: '', sampleCode: p.code, counted: '' }); renderRows();
   });
-  $('#kCat').onchange = () => { const c = $('#kCat').value; S.products = c ? allBlind.filter(p => p.category === c) : allBlind; };
+  $('#kCat').onchange = () => { const c = $('#kCat').value; kOpts.items = c ? allBlind.filter(p => p.category === c) : allBlind; };
   renderRows();
   $('#kSubmit').onclick = async () => {
     if (!$('#kWh').value) return alertWarn('Chưa chọn kho kiểm', 'Vui lòng chọn kho cần kiểm.');
@@ -530,7 +569,8 @@ VIEWS.stocktake = async () => {
 const DISCARD_REASONS = ['Hàng chết / ươn', 'Vỡ nát, dập hỏng', 'Không đạt trọng lượng / kích cỡ', 'Hư hỏng do bảo quản', 'Lý do khác'];
 VIEWS.processing = async () => {
   const v = $('#view'); v.className = 'view';
-  await loadProducts(false);
+  await loadProducts(false); // danh mục POS — chỉ còn dùng cho picker THÀNH PHẨM khi là mã mới chưa từng nhập
+  await loadWhProducts(false); // sản phẩm của kho — nguồn cho picker nguyên liệu + mặc định của picker thành phẩm
   const L = S.boot.lists;
   let ing = null, fin = null;
   v.innerHTML = `
@@ -538,19 +578,23 @@ VIEWS.processing = async () => {
     <div style="display:flex;flex-direction:column;gap:14px;min-width:0">
       <div class="card">
         <div class="info-head"><b>1. Nguyên liệu sống xuất chế biến</b><span class="badge-amber">ĐẦU VÀO (KG)</span></div>
-        <div class="field picker"><label class="f">Chọn mặt hàng hải sản sống (POS)</label>
-          <input class="in" id="cbIngPick" placeholder="Gõ tên / SKU / mã vạch để tìm…" autocomplete="off">
+        <div class="field picker"><label class="f">Chọn mặt hàng hải sản sống trong kho (chỉ mã đã từng nhập)</label>
+          <input class="in" id="cbIngPick" placeholder="Gõ tên / mã để tìm trong kho…" autocomplete="off">
           <div class="picker-list hidden" id="cbIngList"></div></div>
         <div class="field"><div class="locked"><span class="lk">🔒</span><span id="cbIngName">Chưa chọn nguyên liệu</span></div></div>
         <div class="grid2">
           <div class="field" style="margin-bottom:0"><label class="f">Tổng trọng lượng xuất chế biến (Kg) <span class="req">*</span></label><input class="in" id="cbInQty" type="number" min="0" step="0.01" placeholder="0"></div>
-          <div class="field" style="margin-bottom:0"><label class="f">Tồn hiện tại trên POS</label><div class="locked"><span class="lk">🔒</span><span id="cbIngStock">—</span></div></div>
+          <div class="field" style="margin-bottom:0"><label class="f">Tồn thực tế trong kho</label><div class="locked"><span class="lk">🔒</span><span id="cbIngStock">—</span></div></div>
         </div>
       </div>
       <div class="card">
         <div class="info-head"><b>2. Thành phẩm đạt chuẩn bán ra</b><span class="badge-green">DÙNG ĐƯỢC</span></div>
-        <div class="field picker"><label class="f">Chọn mã thành phẩm trên POS (VD: Cua hấp)</label>
-          <input class="in" id="cbFinPick" placeholder="Gõ tên / SKU / mã vạch để tìm…" autocomplete="off">
+        <div class="field picker"><label class="f">Chọn mã thành phẩm (VD: Cua hấp) — mặc định sản phẩm của kho; mã mới chưa từng nhập thì tìm trong danh mục POS</label>
+          <div style="display:flex;gap:6px;margin-bottom:6px">
+            <button class="chip active" id="cbFinSrcWh" type="button">Sản phẩm của kho</button>
+            <button class="chip" id="cbFinSrcPos" type="button">Danh mục POS (mã mới)</button>
+          </div>
+          <input class="in" id="cbFinPick" placeholder="Gõ tên / mã để tìm…" autocomplete="off">
           <div class="picker-list hidden" id="cbFinList"></div></div>
         <div class="field"><div class="locked"><span class="lk">🔒</span><span id="cbFinName">Chưa chọn thành phẩm</span></div></div>
         <div class="grid2">
@@ -604,23 +648,38 @@ VIEWS.processing = async () => {
     $('#cbBarLoss').style.width = pct(loss) + '%';
   }
   ['cbInQty', 'cbUsable', 'cbDiscard'].forEach(id => $('#' + id).addEventListener('input', analyze));
-  productPicker($('#cbIngPick'), $('#cbIngList'), {}, p => {
+  productPicker($('#cbIngPick'), $('#cbIngList'), { items: S.whProducts, itemHtml: whItemHtml, warehouse: () => $('#cbWh').value, emptyMsg: 'Không thấy nguyên liệu trong kho đang chọn. Nguyên liệu chỉ lấy từ sản phẩm kho ĐÃ TỪNG NHẬP — hãy tạo phiếu Nhập hàng trước.' }, p => {
     ing = p;
-    $('#cbIngName').textContent = `${p.name}${p.variant ? ' — ' + p.variant : ''} (${p.sampleCode || ''})`;
-    $('#cbIngStock').textContent = fmtKg(Number(p.stock) || 0) + ' Kg';
+    $('#cbIngName').textContent = `${p.name} (${p.code || ''})`;
+    $('#cbIngStock').textContent = fmtKg(Number(p.balance) || 0) + (p.unit ? ' ' + p.unit : '');
   });
-  productPicker($('#cbFinPick'), $('#cbFinList'), {}, p => {
-    fin = p;
-    $('#cbFinName').textContent = `${p.name}${p.variant ? ' — ' + p.variant : ''} (${p.sampleCode || ''})`;
+  /* Thành phẩm: 2 nguồn — mặc định sản phẩm của kho; chip "Danh mục POS" khi thành phẩm là mã mới chưa từng nhập */
+  let finSrc = 'wh';
+  const finOpts = { items: S.whProducts, itemHtml: whItemHtml, warehouse: () => $('#cbWh').value, emptyMsg: 'Không thấy thành phẩm trong kho đang chọn. Nếu là mã MỚI chưa từng nhập, bấm chip "Danh mục POS (mã mới)" ở trên để tìm.' };
+  productPicker($('#cbFinPick'), $('#cbFinList'), finOpts, p => {
+    fin = finSrc === 'wh'
+      ? { fromWh: true, code: p.code, name: p.name, key: '' }
+      : { fromWh: false, key: p.key, name: p.name, variant: p.variant, sampleCode: p.sampleCode };
+    $('#cbFinName').textContent = finSrc === 'wh' ? `${p.name} (${p.code || ''})` : `${p.name}${p.variant ? ' — ' + p.variant : ''} (${p.sampleCode || ''})`;
   });
+  const setFinSrc = src => {
+    finSrc = src; fin = null;
+    $('#cbFinName').textContent = 'Chưa chọn thành phẩm';
+    $('#cbFinSrcWh').classList.toggle('active', src === 'wh');
+    $('#cbFinSrcPos').classList.toggle('active', src === 'pos');
+    if (src === 'wh') { finOpts.items = S.whProducts; finOpts.itemHtml = whItemHtml; finOpts.warehouse = () => $('#cbWh').value; finOpts.emptyMsg = 'Không thấy thành phẩm trong kho đang chọn. Nếu là mã MỚI chưa từng nhập, bấm chip "Danh mục POS (mã mới)" ở trên để tìm.'; }
+    else { finOpts.items = S.products; finOpts.itemHtml = null; finOpts.warehouse = undefined; finOpts.emptyMsg = 'Không tìm thấy trong danh mục POS. Danh mục gốc nằm trên POS — hãy báo quản lí thêm sản phẩm trên POS trước.'; }
+  };
+  $('#cbFinSrcWh').onclick = () => setFinSrc('wh');
+  $('#cbFinSrcPos').onclick = () => setFinSrc('pos');
   analyze();
   $('#cbSubmit').onclick = async () => {
     if (!$('#cbWh').value) return alertWarn('Chưa chọn kho chế biến', 'Vui lòng chọn kho / khu vực chế biến.');
-    if (!ing) return alertWarn('Chưa chọn nguyên liệu', 'Hãy chọn mặt hàng hải sản sống (POS) ở khối 1.');
+    if (!ing) return alertWarn('Chưa chọn nguyên liệu', 'Hãy chọn mặt hàng hải sản sống trong kho ở khối 1.');
     if (!(Number($('#cbInQty').value) > 0)) return alertWarn('Thiếu trọng lượng đầu vào', 'Hãy nhập tổng trọng lượng xuất chế biến (Kg) ở khối 1.');
     if ((Number($('#cbDiscard').value) || 0) > 0 && !$('#cbReason').value) return alertWarn('Chưa chọn nguyên nhân hủy', 'Đã nhập trọng lượng hủy bỏ — hãy chọn nguyên nhân hủy ở khối 3.');
     try {
-      const r = await post('/api/slips', { type: 'process', warehouse: $('#cbWh').value, note: $('#cbNote').value.trim(), lines: [{ key: ing.key, inputQty: Number($('#cbInQty').value) || 0, usable: Number($('#cbUsable').value) || 0, discard: Number($('#cbDiscard').value) || 0, finishedKey: fin ? fin.key : '', posQty: Number($('#cbPosQty').value) || 0, reason: $('#cbReason').value }] });
+      const r = await post('/api/slips', { type: 'process', warehouse: $('#cbWh').value, note: $('#cbNote').value.trim(), lines: [{ key: ing.posKey || '', sampleCode: ing.code || '', inputQty: Number($('#cbInQty').value) || 0, usable: Number($('#cbUsable').value) || 0, discard: Number($('#cbDiscard').value) || 0, finishedKey: fin && !fin.fromWh ? fin.key : '', finishedSku: fin && fin.fromWh ? fin.code : '', finishedName: fin && fin.fromWh ? fin.name : '', posQty: Number($('#cbPosQty').value) || 0, reason: $('#cbReason').value }] });
       if (r.slip.writeStatus === 'written') await alertOk('Đã lưu phiếu chế biến', `Phiếu ${r.slip.code} đã ghi xuống Sheet.\nNgười thực hiện: ${r.slip.creatorName} • ${r.slip.createdAt}`);
       else await alertWarn('Đã lưu phiếu, chưa ghi được Sheet', `Phiếu ${r.slip.code} đã lưu trong app nhưng ghi Sheet lỗi: ${r.slip.writeError}\nVào Lịch sử phiếu bấm "Ghi lại" khi đã xử lí xong lỗi.`);
       go('processing');
@@ -668,7 +727,7 @@ VIEWS.recon = async () => {
         <button class="btn" id="rScan" style="height:36px">📷 Quét QR / Mã vạch</button>
       </div>
       <div class="recon-video-wrap hidden" id="rVideoWrap">
-        <video id="rVideo" playsinline muted></video>
+        <video id="rVideo" playsinline webkit-playsinline autoplay muted disablepictureinpicture></video>
         <button class="btn danger recon-close" id="rScanClose">✕ Đóng camera</button>
       </div>
       <div style="margin-top:10px"><label class="f">Danh sách đã quét (<span id="rCount">0</span> đơn)</label><div id="rList"></div>
@@ -717,11 +776,30 @@ VIEWS.recon = async () => {
   focusInput();
   /* --- Camera: BarcodeDetector nếu có; không có thì nạp ZXing (CDN) làm dự phòng --- */
   let camOn = false, camStream = null, detTimer = null, zxingReader = null, lastCam = { code: '', at: 0 };
+  /* Chống iOS bật trình phát TOÀN MÀN HÌNH gốc: thẻ video phải đủ bộ thuộc tính phát nội tuyến
+     (playsinline + webkit-playsinline cho iOS cũ/webview + autoplay + muted) và set cả property
+     tương ứng bằng JS TRƯỚC khi play(). TUYỆT ĐỐI không dùng API toàn màn hình ở bất cứ đâu —
+     hộp camera là hộp nội tuyến cao 200px (CSS .recon-video-wrap), video chỉ lấp đầy hộp đó. */
+  function prepareInlineVideo(video) {
+    try {
+      video.setAttribute('playsinline', '');
+      video.setAttribute('webkit-playsinline', '');
+      video.setAttribute('autoplay', '');
+      video.setAttribute('muted', '');
+      video.setAttribute('disablepictureinpicture', '');
+      video.playsInline = true;
+      video.muted = true;
+      video.autoplay = true;
+      video.disablePictureInPicture = true;
+    } catch {}
+  }
   async function stopCam() {
     camOn = false;
     if (detTimer) { clearInterval(detTimer); detTimer = null; }
     if (zxingReader) { try { zxingReader.reset(); } catch {} zxingReader = null; }
     if (camStream) { camStream.getTracks().forEach(x => x.stop()); camStream = null; }
+    const vv = $('#rVideo');
+    if (vv) { try { vv.pause(); } catch {} try { vv.srcObject = null; } catch {} }
     $('#rVideoWrap').classList.add('hidden');
   }
   function camDetect(raw) {
@@ -738,6 +816,7 @@ VIEWS.recon = async () => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return alertWarn('Thiết bị không hỗ trợ camera', 'Trình duyệt này không mở được camera. Bạn vẫn quét được bằng máy quét mã vạch hoặc gõ tay mã đơn.');
     try {
       if ('BarcodeDetector' in window) {
+        prepareInlineVideo(video);
         camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
         video.srcObject = camStream;
         $('#rVideoWrap').classList.remove('hidden');
@@ -754,6 +833,7 @@ VIEWS.recon = async () => {
         const hints = new Map();
         hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.QR_CODE, ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.CODE_39]);
         zxingReader = new ZXing.BrowserMultiFormatReader(hints);
+        prepareInlineVideo(video);
         $('#rVideoWrap').classList.remove('hidden');
         camOn = true;
         zxingReader.decodeFromVideoDevice(null, video, (result) => {
@@ -788,17 +868,20 @@ const TYPE_LBL = { in: 'Nhập hàng', out: 'Xuất hàng', check: 'Kiểm kho',
 VIEWS.history = async () => {
   const v = $('#view'); v.className = 'view';
   v.innerHTML = `<div class="card">
-    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
-      <div class="field" style="width:180px;margin-bottom:0"><label class="f">Loại phiếu</label>
-      <select class="in" id="hType"><option value="">Tất cả</option>${Object.entries(TYPE_LBL).map(([k, x]) => `<option value="${k}">${x}</option>`).join('')}</select></div>
-      <div class="field" style="width:180px;margin-bottom:0"><label class="f">Thời gian</label>
-      <select class="in" id="hTime"><option value="all">Tất cả</option><option value="today">Hôm nay</option><option value="7d">7 ngày gần nhất</option><option value="30d">30 ngày gần nhất</option><option value="month">Tháng này</option><option value="custom">Tuỳ chọn…</option></select></div>
-      <span id="hCustom" class="hidden" style="display:inline-flex;gap:6px;align-items:center">
-        <input class="in" type="date" id="hFrom" style="width:150px"><span class="mut">→</span><input class="in" type="date" id="hTo" style="width:150px">
-      </span>
-      <div class="field" style="width:190px;margin-bottom:0"><label class="f">Trạng thái ghi Sheet</label>
-      <select class="in" id="hWs"><option value="">Tất cả trạng thái</option><option value="written">Đã ghi Sheet</option><option value="unwritten">Chưa ghi Sheet</option><option value="error">Ghi lỗi</option></select></div>
-      <button class="btn" id="hClear">Xoá bộ lọc</button>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;flex:1;min-width:min(520px,100%)">
+        <div class="field" style="width:180px;margin-bottom:0"><label class="f">Loại phiếu</label>
+        <select class="in" id="hType"><option value="">Tất cả</option>${Object.entries(TYPE_LBL).map(([k, x]) => `<option value="${k}">${x}</option>`).join('')}</select></div>
+        <div class="field" style="width:180px;margin-bottom:0"><label class="f">Thời gian</label>
+        <select class="in" id="hTime"><option value="all">Tất cả</option><option value="today">Hôm nay</option><option value="7d">7 ngày gần nhất</option><option value="30d">30 ngày gần nhất</option><option value="month">Tháng này</option><option value="custom">Tuỳ chọn…</option></select></div>
+        <span id="hCustom" class="hidden" style="display:inline-flex;gap:6px;align-items:center">
+          <input class="in" type="date" id="hFrom" style="width:150px"><span class="mut">→</span><input class="in" type="date" id="hTo" style="width:150px">
+        </span>
+        <div class="field" style="width:190px;margin-bottom:0"><label class="f">Trạng thái ghi Sheet</label>
+        <select class="in" id="hWs"><option value="">Tất cả trạng thái</option><option value="written">Đã ghi Sheet</option><option value="unwritten">Chưa ghi Sheet</option><option value="error">Ghi lỗi</option></select></div>
+        <button class="btn" id="hClear">Xoá bộ lọc</button>
+      </div>
+      <div class="hist-total" id="hTotal"><div class="ht-num">Tổng: … phiếu</div></div>
     </div>
     <div id="hList" style="margin-top:12px">Đang tải…</div></div>`;
   function range() {
@@ -817,6 +900,9 @@ VIEWS.history = async () => {
     if (to) q.set('to', to);
     const r = await api('/api/history?' + q.toString());
     const slips = r.slips;
+    // Ô tổng góc phải: đếm theo ĐÚNG bộ lọc hiện tại + phân rã theo loại phiếu
+    const brk = Object.keys(TYPE_LBL).map(t => `${TYPE_LBL[t]} ${slips.filter(s => s.type === t).length}`).join(' · ');
+    $('#hTotal').innerHTML = `<div class="ht-num">Tổng: ${slips.length} phiếu</div><div class="ht-brk">${brk}</div>`;
     $('#hList').innerHTML = slips.length ? slips.map(s => {
       let detail = '';
       if (s.type === 'check') detail = s.lines.map(l => {
@@ -828,16 +914,26 @@ VIEWS.history = async () => {
       else detail = s.lines.map(l => `<tr><td>${esc(l.name)}${l.variant ? ' — ' + esc(l.variant) : ''}</td><td colspan="3">${l.qty} ${esc(l.unit || '')}${l.note ? ' • ' + esc(l.note) : ''}</td></tr>`).join('');
       const wsLine = s.writeStatus === 'written'
         ? `<div class="mut" style="margin-top:4px">Đã ghi lên Sheet${s.writtenAt ? ' lúc ' + esc(s.writtenAt) : ''}</div>`
-        : `<div style="margin-top:6px"><span class="pill warn">${s.writeStatus === 'error' ? 'Ghi lỗi' : 'Chưa ghi Sheet'}</span> ${s.writeError ? `<span class="mut">${esc(s.writeError)}</span>` : ''} <button class="btn" data-retry="${s.id}">↻ Ghi lại</button></div>`;
-      return `<div style="border:1px solid var(--border);border-radius:14px;padding:12px;margin-bottom:10px;background:var(--surface2)">
-        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><span class="pill">${esc(s.code)}</span><b>${TYPE_LBL[s.type]}</b>
+        : `<div style="margin-top:6px"><span class="pill warn">${s.writeStatus === 'error' ? 'Ghi lỗi' : 'Chưa ghi Sheet'}</span> ${s.writeError ? `<span class="mut">${esc(s.writeError)}</span>` : ''}</div>`;
+      // Phiếu THU GỌN kiểu accordion: mặc định chỉ 1 dòng đầu; nút Ghi lại (nếu ghi lỗi) nằm ngay
+      // ở dòng đầu để bấm được không cần mở; bấm dòng đầu (trừ nút Ghi lại) mới mở chi tiết.
+      const retryBtn = s.writeStatus !== 'written' ? `<button class="btn" data-retry="${s.id}" title="Ghi lại phiếu này xuống Sheet">↻ Ghi lại</button>` : '';
+      return `<div class="slip-acc">
+        <div class="slip-acc-head" data-acc-head><span class="pill">${esc(s.code)}</span><b>${TYPE_LBL[s.type]}</b>
         <span class="mut">${esc(s.warehouse || '')}</span><span class="mut">${esc(s.createdAt)}</span>
-        <span style="margin-left:auto">${wsPill(s)}</span></div>
-        <div class="mut" style="margin-top:4px">Người tạo: ${esc(s.creatorName)}${s.type === 'in' && s.expectedDate ? ` • Ngày về dự kiến: ${esc(s.expectedDate)}` : ''}${s.type === 'out' && s.exportType ? ` • Phân loại: ${esc(s.exportType)}` : ''}</div>
-        <table class="tbl" style="margin-top:6px">${s.type === 'check' ? '<tr><th>Sản phẩm</th><th>Đếm thực tế</th><th>Tồn hệ thống</th><th>Chênh lệch</th></tr>' : ''}${detail}</table>
-        ${wsLine}
+        <span class="mut">• ${esc(s.creatorName)}</span>${retryBtn}
+        <span style="margin-left:auto">${wsPill(s)}</span><span class="chev">▾</span></div>
+        <div class="slip-acc-body">
+          <div class="mut">Người tạo: ${esc(s.creatorName)}${s.type === 'in' && s.expectedDate ? ` • Ngày về dự kiến: ${esc(s.expectedDate)}` : ''}${s.type === 'out' && s.exportType ? ` • Phân loại: ${esc(s.exportType)}` : ''}</div>
+          <table class="tbl" style="margin-top:6px">${s.type === 'check' ? '<tr><th>Sản phẩm</th><th>Đếm thực tế</th><th>Tồn hệ thống</th><th>Chênh lệch</th></tr>' : ''}${detail}</table>
+          ${wsLine}
+        </div>
       </div>`;
     }).join('') : '<p class="mut">Không có phiếu nào khớp bộ lọc.</p>';
+    $$('#hList [data-acc-head]').forEach(h => h.onclick = e => {
+      if (e.target.closest('[data-retry]')) return; // bấm Ghi lại thì không mở/thu phiếu
+      h.parentElement.classList.toggle('open');
+    });
     $$('#hList [data-retry]').forEach(b => b.onclick = async () => {
       b.disabled = true;
       try { const r = await post(`/api/slips/${encodeURIComponent(b.dataset.retry)}/retry-write`); await alertOk('Đã ghi lại thành công', `Phiếu ${r.slip.code} đã ghi xuống Sheet lúc ${r.slip.writtenAt}.`); load(); }
@@ -922,7 +1018,7 @@ VIEWS.calendar = async () => {
         ${e.canEdit ? `<div style="margin-top:6px;display:flex;gap:6px"><button class="btn" data-ev-edit="${e.id}">Sửa</button><button class="btn danger" data-ev-del="${e.id}">Xoá</button></div>` : ''}</div>`;
     }
     if (!arrs.length && !evs.length) html += '<p class="mut">Ngày này chưa có hàng về hay sự kiện nào.</p>';
-    html += `<div id="calEvForm"></div><button class="btn primary" id="calAddEv" style="margin-top:4px">+ Thêm sự kiện</button>`;
+    html += `<button class="btn primary" id="calAddEv" style="margin-top:4px">+ Thêm sự kiện</button>`;
     $('#calDayBody').innerHTML = html;
     $$('#calDayBody [data-arr]').forEach(b => b.onclick = async () => {
       const a = arrs.find(x => x.slipId === b.dataset.arr);
@@ -937,18 +1033,21 @@ VIEWS.calendar = async () => {
     $$('#calDayBody [data-ev-edit]').forEach(b => b.onclick = () => openEvForm(evs.find(x => x.id === b.dataset.evEdit)));
     $('#calAddEv').onclick = () => openEvForm(null);
   }
+  /* Form thêm/sửa sự kiện: HỘP THOẠI căn giữa màn hình (#eventWrap trong index.html, nền sau mờ).
+     Bấm ra ngoài nền hoặc Huỷ thì đóng; Lưu xong đóng hộp thoại + nạp lại lịch. */
+  function closeEvForm() { $('#eventWrap').classList.remove('show'); }
   function openEvForm(ev) {
-    const box = $('#calEvForm');
-    box.innerHTML = `<div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin:8px 0;background:var(--surface2)">
-      <div class="field"><label class="f">Tiêu đề *</label><input class="in" id="evTitle" value="${esc(ev ? ev.title : '')}" placeholder="VD: Nhận hàng cua từ NCC A"></div>
-      <div class="grid2">
-        <div class="field"><label class="f">Ngày *</label><input class="in" type="date" id="evDate" value="${esc(ev ? ev.date : S.calSel)}"></div>
-        <div class="field"><label class="f">Giờ (tuỳ chọn)</label><input class="in" type="time" id="evTime" value="${esc(ev ? ev.time : '')}"></div>
-      </div>
-      <div class="field"><label class="f">Ghi chú</label><textarea class="in" id="evNote" rows="2">${esc(ev ? ev.note : '')}</textarea></div>
-      <div style="display:flex;gap:6px"><button class="btn primary" id="evSave">${ev ? 'Lưu sự kiện' : 'Thêm sự kiện'}</button><button class="btn" id="evCancel">Huỷ</button></div>
-    </div>`;
-    $('#evCancel').onclick = () => { box.innerHTML = ''; };
+    const wrap = $('#eventWrap');
+    $('#evFormTitle').textContent = ev ? 'Sửa sự kiện' : 'Thêm sự kiện';
+    $('#evTitle').value = ev ? ev.title : '';
+    $('#evDate').value = ev ? ev.date : S.calSel;
+    $('#evTime').value = ev ? (ev.time || '') : '';
+    $('#evNote').value = ev ? (ev.note || '') : '';
+    $('#evSave').textContent = ev ? 'Lưu sự kiện' : 'Thêm sự kiện';
+    wrap.classList.add('show');
+    setTimeout(() => { const t = $('#evTitle'); if (t) t.focus(); }, 60);
+    $('#evCancel').onclick = closeEvForm;
+    wrap.onclick = e => { if (e.target === wrap) closeEvForm(); };
     $('#evSave').onclick = async () => {
       const body = { title: $('#evTitle').value, date: $('#evDate').value, time: $('#evTime').value, note: $('#evNote').value };
       if (!body.title.trim()) return alertWarn('Chưa nhập tiêu đề', 'Hãy nhập tiêu đề sự kiện.');
@@ -957,6 +1056,7 @@ VIEWS.calendar = async () => {
         if (ev) await api('/api/calendar-events/' + encodeURIComponent(ev.id), { method: 'PUT', body: JSON.stringify(body) });
         else await post('/api/calendar-events', body);
         toast(ev ? 'Đã lưu sự kiện' : 'Đã thêm sự kiện');
+        closeEvForm();
         S.calSel = body.date;
         const [yy, mm] = body.date.split('-').map(Number);
         S.calY = yy; S.calM = mm - 1;

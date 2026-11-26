@@ -17,7 +17,7 @@
   <div class="card login-card">
     <img class="logo-img" src="vitot-logo.png" alt="Logo Vitot" style="width:64px;height:64px;border-radius:20px;margin:0 auto 12px">
     <h1 style="margin:0;font-size:21px">Quản lí kho Vitot</h1>
-    <div class="mut" style="margin-top:4px">Hệ thống nội bộ v25.261126</div>
+    <div class="mut" style="margin-top:4px">Hệ thống nội bộ v27.261126</div>
     <p class="mut" id="loginHint" style="margin:16px 0 0">Nhập mã PIN 4 số để đăng nhập</p>
     <div class="pin-dots" id="pinDots"><span></span><span></span><span></span><span></span></div>
     <div class="pinpad" id="pinPad"></div>
@@ -30,7 +30,7 @@
   <aside id="sidebar">
     <div class="brand">
       <img class="logo-img" src="vitot-logo.png" alt="Logo Vitot">
-      <div><h1>Quản lí kho Vitot</h1><div class="sub">Hệ thống nội bộ v25.261126</div></div>
+      <div><h1>Quản lí kho Vitot</h1><div class="sub">Hệ thống nội bộ v27.261126</div></div>
     </div>
     <nav id="nav"></nav>
     <div class="side-foot">
@@ -49,6 +49,25 @@
     </div>
     <div id="view"></div>
   </main>
+</div>
+
+<!-- Hộp thoại thêm/sửa sự kiện Lịch (mở giữa màn hình, nền phía sau mờ) -->
+<div id="eventWrap">
+  <div class="modal">
+    <div class="modal-head"><span class="mh-dot"></span><span id="evFormTitle">Thêm sự kiện</span></div>
+    <div class="modal-body">
+      <div class="field"><label class="f">Tiêu đề *</label><input class="in" id="evTitle" placeholder="VD: Nhận hàng cua từ NCC A"></div>
+      <div class="grid2">
+        <div class="field"><label class="f">Ngày *</label><input class="in" type="date" id="evDate"></div>
+        <div class="field"><label class="f">Giờ (tuỳ chọn)</label><input class="in" type="time" id="evTime"></div>
+      </div>
+      <div class="field"><label class="f">Ghi chú</label><textarea class="in" id="evNote" rows="2"></textarea></div>
+      <div style="display:flex;gap:8px;margin-top:16px">
+        <button class="btn" id="evCancel" style="flex:1">Huỷ</button>
+        <button class="btn primary" id="evSave" style="flex:1">Lưu sự kiện</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Modal thông báo -->
