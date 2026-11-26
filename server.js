@@ -278,6 +278,58 @@ function buildSlips(tables) {
   return slips;
 }
 
+/* ---- Sổ kho độc lập: tồn kho do KHO tự quản, tính từ các phiếu ĐÃ GHI xuống Sheet ----
+   Phát lại (replay) mọi phiếu written theo thứ tự thời gian tạo phiếu:
+   Nhập +SL • Xuất −SL • Chế biến: −SL nguyên liệu, +SL thành phẩm (SL nhập bán POS)
+   • Kiểm kho: ĐẶT tồn của sản phẩm = số kiểm thực tế tại thời điểm phiếu kiểm.
+   KHÔNG dùng số tồn của tab TỒN_KHO_POS (đó là tồn POS — chỉ còn dùng cho danh mục/picker + Dashboard). */
+function slipTimeKey(s) {
+  const raw = String(s.createdAt || '');
+  let m = raw.match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6] || '00'}`;
+  m = raw.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2}))?/);
+  if (m) return `${m[3]}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')} ${String(m[4] || 0).padStart(2, '0')}:${m[5] || '00'}:00`;
+  return (s.dateKey || '') + ' 00:00:00';
+}
+function computeWarehouseStock() {
+  // Chuẩn hoá mã: phiếu chế biến ghi mã SKU ở cột mã nguyên liệu/thành phẩm, phiếu nhập/xuất ghi Mã mẫu
+  // → quy về 1 mã chung (Mã mẫu nếu có) qua danh mục POS để cộng đúng cùng 1 sản phẩm.
+  const canon = new Map();
+  for (const it of state.inventory.items) {
+    const c = it.sampleCode || it.sku;
+    if (!c) continue;
+    if (it.sku) canon.set(it.sku, c);
+    if (it.sampleCode) canon.set(it.sampleCode, c);
+  }
+  const canonCode = code => canon.get(code) || code || '';
+  const round3 = n => Math.round(n * 1000) / 1000;
+  const map = new Map();
+  const entry = (wh, code, name, unit) => {
+    const c = canonCode(String(code || '').trim());
+    const pk = c || ('name:' + String(name || '').trim().toLowerCase());
+    const k = (wh || '') + '\u0001' + pk;
+    let e = map.get(k);
+    if (!e) { e = { warehouse: wh || '', code: c, name: String(name || '').trim(), unit: unit || '', stock: 0 }; map.set(k, e); }
+    if (name) e.name = String(name).trim();
+    if (unit) e.unit = unit;
+    return e;
+  };
+  // state.slips đang xếp mới→cũ; đảo lại thành cũ→mới rồi sort ổn định theo thời gian tạo phiếu
+  const slips = state.slips.filter(s => s.writeStatus === 'written').slice().reverse();
+  slips.sort((a, b) => { const ka = slipTimeKey(a), kb = slipTimeKey(b); return ka < kb ? -1 : ka > kb ? 1 : 0; });
+  for (const s of slips) {
+    const wh = s.warehouse || '';
+    if (s.type === 'in') for (const l of s.lines || []) { const e = entry(wh, l.sampleCode, l.name, l.unit); e.stock = round3(e.stock + (Number(l.qty) || 0)); }
+    else if (s.type === 'out') for (const l of s.lines || []) { const e = entry(wh, l.sampleCode, l.name, l.unit); e.stock = round3(e.stock - (Number(l.qty) || 0)); }
+    else if (s.type === 'check') for (const l of s.lines || []) { const e = entry(wh, l.sampleCode, l.name, ''); e.stock = Number(l.counted) || 0; }
+    else if (s.type === 'process') for (const l of s.lines || []) {
+      const inp = entry(wh, l.sampleCode, l.name, ''); inp.stock = round3(inp.stock - (Number(l.inputQty) || 0));
+      if (l.finishedSku || l.finishedName) { const fin = entry(wh, l.finishedSku, l.finishedName, ''); fin.stock = round3(fin.stock + (Number(l.posQty) || 0)); }
+    }
+  }
+  return [...map.values()];
+}
+
 async function readAllTables(sheetId) {
   const names = ['TỒN_KHO_POS', 'CẤU_HÌNH', TABS.in, TABS.out, TABS.check, TABS.process, TABS.recon, 'APP_CAI_DAT'];
   const tables = {};
@@ -664,20 +716,23 @@ async function api(req, res, url) {
   }
 
   if (p === '/api/inventory') {
+    // Tra cứu tồn kho theo SỔ KHO ĐỘC LẬP (tính từ phiếu đã ghi Sheet) — KHÔNG dùng tồn POS.
+    // Danh mục POS (TỒN_KHO_POS) chỉ còn phục vụ picker chọn sản phẩm qua /api/products.
     if (!permsOf(user).inventory && !isAdmin(user)) return send(res, 403, { error: 'Không có quyền tra cứu tồn kho.' });
     const wh = url.searchParams.get('warehouse') || '';
     const q = (url.searchParams.get('q') || '').toLowerCase();
     const filter = url.searchParams.get('filter') || 'all';
-    let items = state.inventory.items;
+    let items = computeWarehouseStock();
     const inWh = wh ? items.filter(i => (i.warehouse || '').includes(wh)) : items;
-    const counts = { all: inWh.length, available: inWh.filter(i => i.sellable > 0).length, out: inWh.filter(i => i.sellable <= 0).length };
+    const counts = { all: inWh.length, available: inWh.filter(i => i.stock > 0).length, out: inWh.filter(i => i.stock <= 0).length };
     items = inWh;
-    if (filter === 'available') items = items.filter(i => i.sellable > 0);
-    if (filter === 'out') items = items.filter(i => i.sellable <= 0);
-    if (q) items = items.filter(i => (i.name + ' ' + i.sku + ' ' + i.barcode + ' ' + i.variant).toLowerCase().includes(q));
+    if (filter === 'available') items = items.filter(i => i.stock > 0);
+    if (filter === 'out') items = items.filter(i => i.stock <= 0);
+    if (q) items = items.filter(i => (i.name + ' ' + i.code + ' ' + i.warehouse).toLowerCase().includes(q));
+    items.sort((a, b) => a.name.localeCompare(b.name, 'vi'));
     const page = Math.max(1, parseInt(url.searchParams.get('page') || '1'));
     const size = 100;
-    return send(res, 200, { counts, total: items.length, page, items: items.slice((page - 1) * size, page * size), posUpdatedAt: state.inventory.posUpdatedAt, syncedAt: state.inventory.syncedAt });
+    return send(res, 200, { counts, total: items.length, page, items: items.slice((page - 1) * size, page * size), syncedAt: state.inventory.syncedAt, source: 'warehouse-ledger' });
   }
 
   if (p === '/api/dashboard') {
@@ -728,7 +783,7 @@ async function api(req, res, url) {
       outList: items.filter(i => i.stock <= 0).slice(0, 10),
       slipsInPeriod: ranged.length,
       byType: { in: byType('in'), out: byType('out'), check: byType('check'), process: byType('process'), recon: byType('recon') },
-      unwritten: state.slips.filter(s => s.writeStatus !== 'written').length,
+      written: ranged.filter(s => s.writeStatus === 'written').length,
       reconWarnings: ranged.filter(s => s.type === 'check' && s.lines.some(l => l.variance !== 0)).length,
       cheBienStats, reconScanned, reconDuplicates,
       recent: state.slips.slice(0, 8).map(s => stripBlind(s, user)), chart
