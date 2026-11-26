@@ -84,6 +84,7 @@ body.nav-open{overflow:hidden}
 table.tbl{width:100%;border-collapse:collapse;font-size:14px}
 table.tbl th{text-align:left;color:var(--muted);font-size:12.5px;padding:8px;border-bottom:1px solid var(--border)}
 table.tbl td{padding:8px;border-bottom:1px solid var(--border);vertical-align:top}
+table.tbl tr.diffrow td{background:#fdeeee}
 .badge{display:inline-block;min-width:52px;text-align:center;padding:3px 9px;border-radius:999px;font-weight:700;font-size:13px}
 .badge.g{background:#e2f7e9;color:#0e7a3d}.badge.r{background:#fdeaea;color:#c62f35}.badge.y{background:#fdf3e0;color:#9a6a00}
 html[data-theme="dark"] .badge.g{background:#173626;color:#5fd68a}html[data-theme="dark"] .badge.r{background:#3d1d1f;color:#ff8a8e}html[data-theme="dark"] .badge.y{background:#3a2f16;color:#f5c86e}

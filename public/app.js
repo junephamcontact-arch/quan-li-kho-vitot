@@ -1,5 +1,5 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v28.261126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v29.261126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -187,7 +187,10 @@ function productPicker(inputEl, listEl, opts, onPick) {
       b.innerHTML = opts.itemHtml ? opts.itemHtml(p)
         : opts.blind
         ? `<span class="nm">${esc(p.name)}${p.variant ? ' — ' + esc(p.variant) : ''}</span><span class="meta">${esc(p.sampleCode || '')}</span>`
-        : `<span class="nm">${esc(p.name)}${p.variant ? ' — ' + esc(p.variant) : ''}</span><span class="meta">Tồn: ${p.stock} • Bán: ${p.sellable}</span>`;
+        : (p.stock === undefined
+          // Nhân viên: server không trả số POS → chỉ hiện tên + mã mẫu, TUYỆT ĐỐI không hiện tồn/bán POS
+          ? `<span class="nm">${esc(p.name)}${p.variant ? ' — ' + esc(p.variant) : ''}</span><span class="meta">${esc(p.sampleCode || '')}</span>`
+          : `<span class="nm">${esc(p.name)}${p.variant ? ' — ' + esc(p.variant) : ''}</span><span class="meta">Tồn: ${p.stock} • Bán: ${p.sellable}</span>`);
       b.onclick = () => { listEl.classList.add('hidden'); inputEl.value = ''; onPick(p); };
       listEl.appendChild(b);
     }
@@ -307,7 +310,8 @@ VIEWS.inventory = async () => {
     <div class="inv-summary" id="invSummary"></div>
     <div id="invList" style="margin-top:6px"></div>
     <div style="text-align:center;margin-top:10px"><button class="btn hidden" id="invMore">Xem thêm</button></div>
-  </div>`;
+  </div>
+  <div id="invPosWrap"></div>`;
   let filter = 'all', page = 1;
   async function load(reset) {
     if (reset) page = 1;
@@ -322,6 +326,18 @@ VIEWS.inventory = async () => {
       <td><span class="badge ${i.stock > 5 ? 'g' : i.stock > 0 ? 'y' : 'r'}">${fmtKg(i.stock)}</span></td></tr>`).join('');
     const html = `<table class="tbl"><tr><th>Mã SP</th><th>Sản phẩm</th><th>ĐVT</th><th>Tổng đã nhập</th><th>Tổng đã xuất</th><th>Tồn thực tế (sổ kho)</th></tr>${rows || '<tr><td colspan="6" class="mut">Chưa có sản phẩm nào trong kho. Sản phẩm chỉ xuất hiện tại đây sau khi đã có phiếu NHẬP ghi xuống Sheet (kho độc lập — không lấy danh mục/tồn của POS).</td></tr>'}</table>`;
     if (reset || page === 1) $('#invList').innerHTML = html; else $('#invList').querySelector('tbody').insertAdjacentHTML('beforeend', rows);
+    /* Đối chiếu kho POS chính — server CHỈ trả posCompare cho ADMIN; nhân viên không thấy khối này */
+    const pw = $('#invPosWrap');
+    if (pw) {
+      if (r.posCompare) {
+        const pc = r.posCompare;
+        const prows = pc.rows.map(x => `<tr class="${x.diff !== 0 ? 'diffrow' : ''}"><td>${esc(x.code) || '—'}</td><td><b>${esc(x.name)}</b><div class="mut">${esc(x.warehouse || '')}</div></td><td>${fmtKg(x.storeStock)}</td><td>${fmtKg(x.posStock)}</td><td><span class="badge ${x.diff === 0 ? 'g' : 'r'}">${x.diff > 0 ? '+' : ''}${fmtKg(x.diff)}</span></td></tr>`).join('');
+        pw.innerHTML = `<div class="card" style="margin-top:12px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b>Đối chiếu kho POS chính</b><span class="badge y">Chỉ quản lí (ADMIN)</span><span style="margin-left:auto" class="mut">Lệch: <b>${pc.mismatchCount}</b> / ${pc.rows.length} mặt hàng</span></div>
+          <div class="mut" style="margin:6px 0">Chênh lệch = Tồn kho cửa hàng (sổ kho) − Tồn kho POS chính. Dòng tô đỏ là mặt hàng đang lệch số giữa 2 kho; sản phẩm chỉ có ở 1 phía vẫn được liệt kê.</div>
+          <table class="tbl"><tr><th>Mã SP</th><th>Sản phẩm</th><th>Tồn kho cửa hàng</th><th>Tồn kho POS chính</th><th>Chênh lệch</th></tr>${prows || '<tr><td colspan="5" class="mut">Chưa có dữ liệu đối chiếu.</td></tr>'}</table></div>`;
+      } else pw.innerHTML = '';
+    }
     $('#invMore').classList.toggle('hidden', r.total <= page * 100);
   }
   let deb; $('#invQ').oninput = () => { clearTimeout(deb); deb = setTimeout(() => load(true), 160); };
