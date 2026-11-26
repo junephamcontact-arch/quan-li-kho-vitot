@@ -302,9 +302,12 @@ function buildSlips(tables) {
 }
 
 /* ---- Sổ kho độc lập: tồn kho do KHO tự quản, tính từ các phiếu ĐÃ GHI xuống Sheet ----
-   Phát lại (replay) mọi phiếu written theo thứ tự thời gian tạo phiếu:
-   Nhập +SL • Xuất −SL • Chế biến: −SL nguyên liệu, +SL thành phẩm (SL nhập bán POS)
-   • Kiểm kho: ĐẶT tồn của sản phẩm = số kiểm thực tế tại thời điểm phiếu kiểm.
+   CÔNG THỨC TỒN (chốt v30): Tồn = Tổng nhập − Tổng xuất. Cụ thể khi phát lại (replay)
+   mọi phiếu written theo thứ tự thời gian tạo phiếu:
+   Nhập +SL • Xuất −SL • Chế biến: −SL nguyên liệu (tính vào Tổng xuất), +SL thành phẩm
+   (SL nhập bán POS — tính vào Tổng nhập).
+   • Kiểm kho: KHÔNG ảnh hưởng số tồn — phiếu kiểm chỉ đối chiếu (tồn hệ thống trên phiếu
+     kiểm = số dư theo đúng công thức này tại thời điểm kiểm), không "đặt lại tồn" nữa.
    KHÔNG dùng số tồn của tab TỒN_KHO_POS (đó là tồn POS — chỉ còn dùng cho danh mục/picker + Dashboard). */
 function slipTimeKey(s) {
   const raw = String(s.createdAt || '');
@@ -349,10 +352,11 @@ function computeWarehouseStock() {
     if (!e) {
       e = {
         warehouse: wh || '', code: c, name: dispProdName(name), unit: unit || '', stock: 0,
-        // Số liệu TỔNG HỢP theo mã (gộp mọi phiếu): totalIn = tổng SL đã nhập qua mọi phiếu Nhập;
-        // totalOut = tổng SL xuất kho + nguyên liệu đưa vào chế biến; processIn = thành phẩm chế biến nhập lại kho;
-        // checkAdj = tổng điều chỉnh do kiểm kho (ĐẶT tồn = số đếm). Hằng đẳng thức: stock = totalIn − totalOut + processIn + checkAdj.
-        totalIn: 0, totalOut: 0, processIn: 0, checkAdj: 0,
+        // Số liệu TỔNG HỢP theo mã (gộp mọi phiếu): totalIn = tổng SL nhập (phiếu Nhập + thành phẩm
+        // chế biến nhập lại kho); totalOut = tổng SL xuất kho + nguyên liệu đưa vào chế biến;
+        // processIn = riêng phần thành phẩm chế biến trong totalIn (để đối chiếu). Kiểm kho KHÔNG
+        // còn điều chỉnh tồn. Hằng đẳng thức (v30): stock = totalIn − totalOut.
+        totalIn: 0, totalOut: 0, processIn: 0,
         fromInbound: false, // true khi sản phẩm từng xuất hiện trong 1 phiếu Nhập đã ghi — chỉ những mã này mới thuộc "sản phẩm của kho"
         lastInAt: '', lastInKey: ''
       };
@@ -382,12 +386,8 @@ function computeWarehouseStock() {
       e.stock = round3(e.stock - qty);
       e.totalOut = round3(e.totalOut + qty);
     }
-    else if (s.type === 'check') for (const l of s.lines || []) {
-      const e = entry(wh, l.sampleCode, l.name, '');
-      const counted = Number(l.counted) || 0;
-      e.checkAdj = round3(e.checkAdj + (counted - e.stock)); // kiểm kho ĐẶT tồn → phần chênh so với sổ ngay trước phiếu kiểm là điều chỉnh
-      e.stock = counted;
-    }
+    // Phiếu Kiểm kho (type 'check') cố ý KHÔNG được phát lại ở đây: từ v30 kiểm kho chỉ đối
+    // chiếu, không đặt lại/điều chỉnh tồn — tồn chỉ do Nhập/Xuất/Chế biến quyết định.
     else if (s.type === 'process') for (const l of s.lines || []) {
       const iq = Number(l.inputQty) || 0;
       const inp = entry(wh, l.sampleCode, l.name, '');
@@ -397,6 +397,7 @@ function computeWarehouseStock() {
         const pq = Number(l.posQty) || 0;
         const fin = entry(wh, l.finishedSku, l.finishedName, '');
         fin.stock = round3(fin.stock + pq);
+        fin.totalIn = round3(fin.totalIn + pq); // thành phẩm nhập lại kho tính vào TỔNG NHẬP (công thức tồn v30)
         fin.processIn = round3(fin.processIn + pq);
       }
     }
@@ -410,7 +411,8 @@ function computeWarehouseStock() {
 function warehouseEntries() {
   return computeWarehouseStock().filter(e => e.fromInbound);
 }
-/* Tồn sổ kho hiện tại của 1 sản phẩm tại 1 kho (dùng làm "tồn hệ thống" dự phòng cho phiếu kiểm khi không tra được POS).
+/* Tồn sổ kho hiện tại của 1 sản phẩm tại 1 kho theo công thức Tồn = Tổng nhập − Tổng xuất
+   (dùng làm "tồn hệ thống" đối chiếu trên phiếu kiểm — từ v30 luôn dùng số này, không dùng tồn POS).
    Định danh theo mã + TÊN như dataset kho: có tên thì khớp đúng dòng mang tên đó; không có tên thì lấy dòng đầu tiên theo mã. */
 function ledgerBalanceOf(warehouse, code, name) {
   const c = buildCanon().get(code) || code || '';
@@ -757,10 +759,11 @@ async function createSlip(user, body) {
   } else if (type === 'check') {
     for (const l of linesIn) {
       const item = itemOf(l);
-      // "Tồn hệ thống" đối chiếu: ưu tiên tồn POS khi tra được theo key; picker kho không tra được POS
-      // thì lấy tồn SỔ KHO hiện tại của mã đó (thay vì 0 như trước — 0 làm sai lệch cột chênh lệch trên Sheet).
+      // "Tồn hệ thống" đối chiếu trên phiếu kiểm (v30): LUÔN là số dư SỔ KHO theo công thức
+      // Tồn = Tổng nhập − Tổng xuất tại thời điểm tạo phiếu — chỉ để tham khảo/tính chênh lệch,
+      // phiếu kiểm không ghi đè số tồn (khác trước đây: từng ưu tiên tồn POS khi tra được key).
       const lineCode = item ? item.sampleCode : (l.sampleCode || '');
-      const systemStock = item ? item.stock : ledgerBalanceOf(slip.warehouse, lineCode, l.name || '');
+      const systemStock = ledgerBalanceOf(slip.warehouse, lineCode, l.name || '');
       const counted = Number(l.counted) || 0;
       const variance = counted - systemStock;
       const matchStatus = variance === 0 ? 'Khớp' : (variance > 0 ? 'Thừa' : 'Thiếu');
@@ -889,7 +892,7 @@ async function api(req, res, url) {
         warehouse: e.warehouse, code: e.code, name: e.name, unit: e.unit,
         category: pos ? pos.category : '', posKey: pos ? pos.key : ''
       };
-      return blind ? base : { ...base, totalIn: e.totalIn, totalOut: e.totalOut, processIn: e.processIn, checkAdj: e.checkAdj, balance: e.stock, lastInAt: e.lastInAt };
+      return blind ? base : { ...base, totalIn: e.totalIn, totalOut: e.totalOut, processIn: e.processIn, balance: e.stock, lastInAt: e.lastInAt };
     });
     return send(res, 200, { items: out });
   }
@@ -912,7 +915,9 @@ async function api(req, res, url) {
     items.sort((a, b) => a.name.localeCompare(b.name, 'vi'));
     const page = Math.max(1, parseInt(url.searchParams.get('page') || '1'));
     const size = 100;
-    const out = { counts, summary, total: items.length, page, items: items.slice((page - 1) * size, page * size), syncedAt: state.inventory.syncedAt, source: 'warehouse-ledger' };
+    // warehouseStock = tổng hợp TOÀN BỘ kho bằng đúng hàm warehouseSummary như bootstrap —
+    // client dùng nó cập nhật chip "Tồn kho" trên thanh đầu để chip/tóm tắt/bảng không bao giờ lệch nhau.
+    const out = { counts, summary, warehouseStock: warehouseSummary(), total: items.length, page, items: items.slice((page - 1) * size, page * size), syncedAt: state.inventory.syncedAt, source: 'warehouse-ledger' };
     // Đối chiếu với kho POS chính: CHỈ ADMIN — nhân viên không nhận được bất kỳ số POS nào qua API này.
     if (isAdmin(user)) out.posCompare = posComparison(inWh, wh);
     return send(res, 200, out);
@@ -1349,8 +1354,9 @@ async function api(req, res, url) {
     }
   }
   if (p === '/api/sheet-sync' && method === 'POST') {
-    if (!needAdmin(req, res)) return;
-    try { await reloadCache(); return send(res, 200, { ok: true, count: state.inventory.items.length, syncedAt: state.inventory.syncedAt, posUpdatedAt: state.inventory.posUpdatedAt, warehouseStock: warehouseSummary() }); }
+    // Đồng bộ thủ công (nút "Đồng bộ" trên thanh đầu — v30): MỌI tài khoản đã đăng nhập đều bấm
+    // được (chỉ đọc lại Sheet, không ghi gì). Trả kèm số phiếu đã đọc để thông báo hoàn tất.
+    try { await reloadCache(); return send(res, 200, { ok: true, count: state.inventory.items.length, slips: state.slips.length, syncedAt: state.inventory.syncedAt, posUpdatedAt: state.inventory.posUpdatedAt, warehouseStock: warehouseSummary() }); }
     catch (e) { return send(res, 400, { error: e.message }); }
   }
 
