@@ -433,38 +433,54 @@ function warehouseSummary(entries) {
 
 /* Đối chiếu kho cửa hàng (sổ kho) ↔ kho POS chính (tab TỒN_KHO_POS) — CHỈ ADMIN mới được xem.
    Khớp sản phẩm theo mã đã chuẩn hoá + TÊN (đúng định danh của dataset kho); sản phẩm chỉ có ở
-   1 phía vẫn liệt kê (phía còn lại tính 0). Chênh lệch = tồn kho cửa hàng − tồn POS chính. */
-function posComparison(entries, whFilter) {
+   1 phía vẫn liệt kê (phía còn lại tính 0). Chênh lệch = tồn kho cửa hàng − tồn POS chính.
+   • Phía POS: gộp theo MÃ + TÊN trên TOÀN BỘ tab TỒN_KHO_POS — "Tồn kho POS chính" của 1 sản
+     phẩm là TỔNG tồn của mọi dòng POS mang định danh đó (KHÔNG tách dòng theo từng kho POS).
+   • Phía kho cửa hàng: các dòng sổ kho cùng MÃ + TÊN (ở nhiều kho cửa hàng) cũng gộp 1 dòng,
+     tồn = tổng các kho đang xét → mỗi sản phẩm có đúng 1 dòng trong bảng đối chiếu.
+   • q = từ khoá của ô tìm kiếm chính màn Tra cứu (tên hoặc mã): rows trả về đã lọc theo q,
+     nhưng mismatchCount + totalRows LUÔN tính trên toàn bộ danh sách chưa lọc. */
+function posComparison(entries, q) {
   const canon = buildCanon();
   const round3 = n => Math.round(n * 1000) / 1000;
-  const groups = new Map(); // nhóm POS theo mã + tên + kho POS
+  const posGroups = new Map(); // nhóm POS theo mã + tên (toàn bộ các kho POS)
   for (const i of state.inventory.items) {
     const c = canon.get(i.sampleCode || i.sku) || i.sampleCode || i.sku || '';
     if (!c) continue;
     const label = productLabel(i, null);
-    const k = c + '\u0002' + normProdName(label) + '\u0001' + (i.warehouse || '');
-    let g = groups.get(k);
-    if (!g) { g = { code: c, name: dispProdName(label), warehouse: i.warehouse || '', posStock: 0 }; groups.set(k, g); }
+    const k = c + '\u0002' + normProdName(label);
+    let g = posGroups.get(k);
+    if (!g) { g = { code: c, name: dispProdName(label), posStock: 0, warehouses: [] }; posGroups.set(k, g); }
     g.posStock = round3(g.posStock + (Number(i.stock) || 0));
+    if (i.warehouse && !g.warehouses.includes(i.warehouse)) g.warehouses.push(i.warehouse);
+  }
+  const storeGroups = new Map(); // nhóm kho cửa hàng theo mã + tên
+  for (const e of entries) {
+    const k = e.code + '\u0002' + normProdName(e.name);
+    let g = storeGroups.get(k);
+    if (!g) { g = { code: e.code, name: e.name, unit: e.unit || '', storeStock: 0, warehouses: [] }; storeGroups.set(k, g); }
+    g.storeStock = round3(g.storeStock + (Number(e.stock) || 0));
+    if (e.warehouse && !g.warehouses.includes(e.warehouse)) g.warehouses.push(e.warehouse);
+    if (!g.unit && e.unit) g.unit = e.unit;
   }
   const rows = [];
-  const matched = new Set();
-  for (const e of entries) {
-    let pos = 0;
-    for (const [k, g] of groups) {
-      if (g.code !== e.code || normProdName(g.name) !== normProdName(e.name)) continue;
-      if (e.warehouse && g.warehouse && !g.warehouse.includes(e.warehouse) && !e.warehouse.includes(g.warehouse)) continue;
-      pos = round3(pos + g.posStock); matched.add(k);
-    }
-    rows.push({ code: e.code, name: e.name, warehouse: e.warehouse, unit: e.unit || '', storeStock: e.stock, posStock: pos, diff: round3(e.stock - pos) });
+  const matchedPos = new Set();
+  for (const [k, g] of storeGroups) {
+    const p = posGroups.get(k);
+    if (p) matchedPos.add(k);
+    const pos = p ? p.posStock : 0;
+    rows.push({ code: g.code, name: g.name, warehouse: g.warehouses.join(', '), unit: g.unit, storeStock: g.storeStock, posStock: pos, diff: round3(g.storeStock - pos) });
   }
-  for (const [k, g] of groups) {
-    if (matched.has(k)) continue;
-    if (whFilter && !(g.warehouse || '').includes(whFilter)) continue;
-    rows.push({ code: g.code, name: g.name, warehouse: g.warehouse, unit: '', storeStock: 0, posStock: g.posStock, diff: round3(-g.posStock) });
+  for (const [k, g] of posGroups) {
+    if (matchedPos.has(k)) continue;
+    rows.push({ code: g.code, name: g.name, warehouse: g.warehouses.join(', '), unit: '', storeStock: 0, posStock: g.posStock, diff: round3(-g.posStock) });
   }
   rows.sort((a, b) => (Math.abs(b.diff) - Math.abs(a.diff)) || a.name.localeCompare(b.name, 'vi'));
-  return { rows, mismatchCount: rows.filter(r => r.diff !== 0).length };
+  const totalRows = rows.length;
+  const mismatchCount = rows.filter(r => r.diff !== 0).length;
+  const needle = String(q || '').trim().toLowerCase();
+  const filtered = needle ? rows.filter(r => (r.name + ' ' + r.code).toLowerCase().includes(needle)) : rows;
+  return { rows: filtered, mismatchCount, totalRows };
 }
 
 async function readAllTables(sheetId) {
@@ -919,7 +935,8 @@ async function api(req, res, url) {
     // client dùng nó cập nhật chip "Tồn kho" trên thanh đầu để chip/tóm tắt/bảng không bao giờ lệch nhau.
     const out = { counts, summary, warehouseStock: warehouseSummary(), total: items.length, page, items: items.slice((page - 1) * size, page * size), syncedAt: state.inventory.syncedAt, source: 'warehouse-ledger' };
     // Đối chiếu với kho POS chính: CHỈ ADMIN — nhân viên không nhận được bất kỳ số POS nào qua API này.
-    if (isAdmin(user)) out.posCompare = posComparison(inWh, wh);
+    // Bảng đối chiếu lọc theo CÙNG ô tìm kiếm q của màn Tra cứu (tổng kết lệch vẫn tính trên toàn bộ).
+    if (isAdmin(user)) out.posCompare = posComparison(inWh, q);
     return send(res, 200, out);
   }
 
