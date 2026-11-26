@@ -246,6 +246,24 @@ html[data-theme="dark"] .rules-box-purple{background:#241a3d;color:#cdbcf7;borde
 html[data-theme="dark"] .cal-tag.arr{background:#3a2f16;color:#f5c86e}
 html[data-theme="dark"] .cal-tag.evt{background:#173626;color:#5fd68a}
 
+/* ---------- Tra cứu tồn kho: dòng tóm tắt tồn THỰC TẾ theo sổ kho ---------- */
+.inv-summary{margin-top:10px;background:var(--tint);border:1px solid var(--green);border-radius:12px;padding:9px 13px;font-size:14.5px}
+.inv-summary b{font-weight:800}
+
+/* ---------- Lịch sử phiếu: ô tổng góc phải + phiếu thu gọn kiểu accordion ---------- */
+.hist-total{margin-left:auto;text-align:right;background:var(--tint);border:1px solid var(--green);border-radius:14px;padding:8px 14px;min-width:180px}
+.hist-total .ht-num{font-size:20px;font-weight:800;line-height:1.15}
+.hist-total .ht-brk{font-size:11.5px;color:var(--muted);margin-top:2px;line-height:1.55}
+.slip-acc{border:1px solid var(--border);border-radius:14px;margin-bottom:8px;background:var(--surface2);overflow:hidden}
+.slip-acc-head{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 12px;cursor:pointer;user-select:none;-webkit-user-select:none}
+.slip-acc-head .chev{transition:transform .2s ease;color:var(--muted);font-weight:700}
+.slip-acc.open .slip-acc-head .chev{transform:rotate(180deg)}
+.slip-acc-body{display:none;padding:0 12px 12px}
+.slip-acc.open .slip-acc-body{display:block}
+
+/* ---------- Lịch: form thêm/sửa sự kiện INLINE trong panel ngày ---------- */
+.cal-ev-form{margin-top:14px;border-top:1px dashed var(--border);padding-top:12px;text-align:left}
+
 /* ---------- Toast ---------- */
 #toasts{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:120;display:flex;flex-direction:column;gap:8px;align-items:center}
 .toast{background:#173626;color:#eafff2;padding:10px 16px;border-radius:13px;box-shadow:var(--shadow-lg);font-size:14px;font-weight:600;animation:pop .2s ease;max-width:92vw}
@@ -256,8 +274,11 @@ html[data-theme="dark"] .cal-tag.evt{background:#173626;color:#5fd68a}
 /* Đối soát GỌN: hàng quét ~36px */
 .scan-input{height:36px;font-size:15px;font-weight:600}
 .recon-row{display:flex;gap:7px;align-items:center;padding:6px 9px;border:1px solid var(--border);border-radius:11px;background:var(--surface2);margin-bottom:6px}
-.recon-video-wrap{position:relative;margin-top:10px}
-.recon-video-wrap video{width:100%;height:220px;object-fit:cover;border-radius:14px;display:block;background:#000}
+/* Hộp camera: NỘI TUYẾN, cao cố định 200px, GHIM (sticky) ở mép trên khi cuộn — video chỉ lấp
+   đầy hộp (absolute + object-fit:cover), hộp có overflow:hidden nên video KHÔNG BAO GIỜ phình
+   ra che mất danh sách chip bên dưới, kể cả khi webview iOS xử lí thẻ video bất thường. */
+.recon-video-wrap{position:sticky;top:8px;z-index:6;height:200px;overflow:hidden;margin-top:10px;border-radius:14px;background:#000;box-shadow:var(--shadow-lg)}
+.recon-video-wrap video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;background:#000}
 .recon-close{position:absolute;top:8px;right:8px;z-index:2}
 /* Danh sách mã đã quét: CHIP xếp hàng ngang, tự xuống hàng; mã trùng → nền đỏ */
 #rList{display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start}

@@ -1,5 +1,5 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v27.261126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v28.261126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -441,11 +441,18 @@ VIEWS.inbound = async () => {
   </div>`;
   const clock = setInterval(() => { const el = $('#inCreated'); if (!el || S.view !== 'inbound') { clearInterval(clock); return; } el.value = fmtAutoTime(new Date()); }, 20000);
   const rowsBox = $('#inRows');
-  /* Thông tin tham khảo từ dataset kho cho 1 mã: ưu tiên đúng kho đang chọn trên phiếu, không có thì cộng mọi kho */
-  function whInfo(code) {
+  /* Thông tin tham khảo từ dataset kho cho 1 sản phẩm: định danh = mã + TÊN (nhãn gồm biến thể) —
+     cùng mã khác tên là 2 sản phẩm khác nhau, chỉ cộng đúng dòng khớp tên; không khớp tên nào thì mới cộng theo mã thuần.
+     Ưu tiên đúng kho đang chọn trên phiếu, không có thì cộng mọi kho. */
+  function whInfo(code, label) {
     if (!code) return null;
     let es = S.whProducts.filter(w => w.code === code);
     if (!es.length) return null;
+    if (label) {
+      const nl = String(label).trim().replace(/\s+/g, ' ').toLowerCase();
+      const byName = es.filter(w => String(w.name || '').trim().replace(/\s+/g, ' ').toLowerCase() === nl);
+      if (byName.length) es = byName;
+    }
     const sel = $('#inWh') ? $('#inWh').value : '';
     const inSel = es.filter(w => w.warehouse === sel);
     if (inSel.length) es = inSel;
@@ -460,7 +467,7 @@ VIEWS.inbound = async () => {
     if (!S.slipLines.length) {
       rowsBox.innerHTML = `<tr><td colspan="6"><div class="in-empty"><span class="box">📦</span>Chưa có sản phẩm nào trong phiếu nhập<div class="sub">Gõ tên sản phẩm hoặc mã mẫu vào ô tìm kiếm phía trên</div></div></td></tr>`;
     } else {
-      rowsBox.innerHTML = S.slipLines.map((l, i) => { const wi = whInfo(l.whCode); return `<tr>
+      rowsBox.innerHTML = S.slipLines.map((l, i) => { const wi = whInfo(l.whCode, l.variant ? `${l.name} (${l.variant})` : l.name); return `<tr>
         <td>${i + 1}</td>
         <td>${esc(l.sampleCode || '')}</td>
         <td><b>${esc(l.name)}</b>${l.variant ? ' — ' + esc(l.variant) : ''}${wi ? `<div class="mut">Đã nhập tổng: ${fmtKg(wi.totalIn)} · Tồn kho hiện tại: ${fmtKg(wi.balance)}</div>` : ''}</td>
@@ -547,7 +554,7 @@ VIEWS.stocktake = async () => {
   }
   const kOpts = { items: allBlind, itemHtml: whBlindHtml, warehouse: () => $('#kWh').value, emptyMsg: 'Không thấy sản phẩm trong kho đang chọn. Chỉ kiểm được sản phẩm kho ĐÃ TỪNG NHẬP — mã chưa nhập lần nào sẽ không có trong danh sách kiểm.' };
   productPicker($('#kPick'), $('#kPickList'), kOpts, p => {
-    if (S.slipLines.some(l => l.sampleCode === p.code)) return toast('Sản phẩm đã có trong danh sách kiểm.');
+    if (S.slipLines.some(l => l.sampleCode === p.code && l.name === p.name)) return toast('Sản phẩm đã có trong danh sách kiểm.');
     S.slipLines.push({ key: p.posKey || '', name: p.name, variant: '', sampleCode: p.code, counted: '' }); renderRows();
   });
   $('#kCat').onchange = () => { const c = $('#kCat').value; kOpts.items = c ? allBlind.filter(p => p.category === c) : allBlind; };
@@ -679,7 +686,7 @@ VIEWS.processing = async () => {
     if (!(Number($('#cbInQty').value) > 0)) return alertWarn('Thiếu trọng lượng đầu vào', 'Hãy nhập tổng trọng lượng xuất chế biến (Kg) ở khối 1.');
     if ((Number($('#cbDiscard').value) || 0) > 0 && !$('#cbReason').value) return alertWarn('Chưa chọn nguyên nhân hủy', 'Đã nhập trọng lượng hủy bỏ — hãy chọn nguyên nhân hủy ở khối 3.');
     try {
-      const r = await post('/api/slips', { type: 'process', warehouse: $('#cbWh').value, note: $('#cbNote').value.trim(), lines: [{ key: ing.posKey || '', sampleCode: ing.code || '', inputQty: Number($('#cbInQty').value) || 0, usable: Number($('#cbUsable').value) || 0, discard: Number($('#cbDiscard').value) || 0, finishedKey: fin && !fin.fromWh ? fin.key : '', finishedSku: fin && fin.fromWh ? fin.code : '', finishedName: fin && fin.fromWh ? fin.name : '', posQty: Number($('#cbPosQty').value) || 0, reason: $('#cbReason').value }] });
+      const r = await post('/api/slips', { type: 'process', warehouse: $('#cbWh').value, note: $('#cbNote').value.trim(), lines: [{ key: ing.posKey || '', sampleCode: ing.code || '', name: ing.name || '', inputQty: Number($('#cbInQty').value) || 0, usable: Number($('#cbUsable').value) || 0, discard: Number($('#cbDiscard').value) || 0, finishedKey: fin && !fin.fromWh ? fin.key : '', finishedSku: fin && fin.fromWh ? fin.code : '', finishedName: fin && fin.fromWh ? fin.name : '', posQty: Number($('#cbPosQty').value) || 0, reason: $('#cbReason').value }] });
       if (r.slip.writeStatus === 'written') await alertOk('Đã lưu phiếu chế biến', `Phiếu ${r.slip.code} đã ghi xuống Sheet.\nNgười thực hiện: ${r.slip.creatorName} • ${r.slip.createdAt}`);
       else await alertWarn('Đã lưu phiếu, chưa ghi được Sheet', `Phiếu ${r.slip.code} đã lưu trong app nhưng ghi Sheet lỗi: ${r.slip.writeError}\nVào Lịch sử phiếu bấm "Ghi lại" khi đã xử lí xong lỗi.`);
       go('processing');
@@ -952,6 +959,7 @@ VIEWS.history = async () => {
 /* ---------- Lịch: hàng về từ phiếu nhập + sự kiện kiểu Google Calendar ---------- */
 VIEWS.calendar = async () => {
   const v = $('#view'); v.className = 'view';
+  let evEdit = null; // sự kiện đang sửa bằng form INLINE trong panel ngày (null = đang ở chế độ thêm mới)
   if (!S.calSel) {
     const now = new Date(); S.calY = now.getFullYear(); S.calM = now.getMonth(); S.calSel = bkkKey(0);
   }
@@ -980,6 +988,7 @@ VIEWS.calendar = async () => {
     return { cells, key, from: key(cells[0]), to: key(cells[41]) };
   }
   async function load() {
+    evEdit = null; // đổi tháng/ngày → form inline quay về chế độ thêm mới
     const { cells, key, from, to } = gridRange();
     $('#calTitle').textContent = `Tháng ${S.calM + 1}/${S.calY}`;
     try { S.calData = await api(`/api/calendar?from=${from}&to=${to}`); } catch { S.calData = { arrivals: [], events: [] }; }
@@ -1019,6 +1028,21 @@ VIEWS.calendar = async () => {
     }
     if (!arrs.length && !evs.length) html += '<p class="mut">Ngày này chưa có hàng về hay sự kiện nào.</p>';
     html += `<button class="btn primary" id="calAddEv" style="margin-top:4px">+ Thêm sự kiện</button>`;
+    /* Form thêm/sửa sự kiện INLINE ngay trong panel ngày (đúng bản cũ trước v26 — không dùng hộp thoại modal nữa) */
+    const evF = evEdit;
+    html += `<div class="cal-ev-form" id="calEvForm">
+      <b>${evF ? 'Sửa sự kiện' : 'Thêm sự kiện'}</b>
+      <div class="field" style="margin-top:8px"><label class="f">Tiêu đề *</label><input class="in" id="calEvTitle" placeholder="VD: Nhận hàng cua từ NCC A" value="${evF ? esc(evF.title) : ''}"></div>
+      <div class="grid2">
+        <div class="field"><label class="f">Ngày *</label><input class="in" type="date" id="calEvDate" value="${evF ? esc(evF.date) : k}"></div>
+        <div class="field"><label class="f">Giờ (tuỳ chọn)</label><input class="in" type="time" id="calEvTime" value="${evF ? esc(evF.time || '') : ''}"></div>
+      </div>
+      <div class="field"><label class="f">Ghi chú</label><textarea class="in" id="calEvNote" rows="2">${evF ? esc(evF.note || '') : ''}</textarea></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn primary" id="calEvSave">${evF ? 'Lưu sự kiện' : 'Thêm sự kiện'}</button>
+        ${evF ? '<button class="btn" id="calEvCancel">Huỷ sửa</button>' : ''}
+      </div>
+    </div>`;
     $('#calDayBody').innerHTML = html;
     $$('#calDayBody [data-arr]').forEach(b => b.onclick = async () => {
       const a = arrs.find(x => x.slipId === b.dataset.arr);
@@ -1030,39 +1054,32 @@ VIEWS.calendar = async () => {
       try { await api('/api/calendar-events/' + encodeURIComponent(b.dataset.evDel), { method: 'DELETE' }); toast('Đã xoá sự kiện'); load(); }
       catch (e) { alertErr('Không xoá được', e.message); }
     });
-    $$('#calDayBody [data-ev-edit]').forEach(b => b.onclick = () => openEvForm(evs.find(x => x.id === b.dataset.evEdit)));
-    $('#calAddEv').onclick = () => openEvForm(null);
-  }
-  /* Form thêm/sửa sự kiện: HỘP THOẠI căn giữa màn hình (#eventWrap trong index.html, nền sau mờ).
-     Bấm ra ngoài nền hoặc Huỷ thì đóng; Lưu xong đóng hộp thoại + nạp lại lịch. */
-  function closeEvForm() { $('#eventWrap').classList.remove('show'); }
-  function openEvForm(ev) {
-    const wrap = $('#eventWrap');
-    $('#evFormTitle').textContent = ev ? 'Sửa sự kiện' : 'Thêm sự kiện';
-    $('#evTitle').value = ev ? ev.title : '';
-    $('#evDate').value = ev ? ev.date : S.calSel;
-    $('#evTime').value = ev ? (ev.time || '') : '';
-    $('#evNote').value = ev ? (ev.note || '') : '';
-    $('#evSave').textContent = ev ? 'Lưu sự kiện' : 'Thêm sự kiện';
-    wrap.classList.add('show');
-    setTimeout(() => { const t = $('#evTitle'); if (t) t.focus(); }, 60);
-    $('#evCancel').onclick = closeEvForm;
-    wrap.onclick = e => { if (e.target === wrap) closeEvForm(); };
-    $('#evSave').onclick = async () => {
-      const body = { title: $('#evTitle').value, date: $('#evDate').value, time: $('#evTime').value, note: $('#evNote').value };
+    $$('#calDayBody [data-ev-edit]').forEach(b => b.onclick = () => {
+      evEdit = evs.find(x => x.id === b.dataset.evEdit) || null;
+      renderDay();
+      const t = $('#calEvTitle'); if (t) { t.focus(); t.scrollIntoView({ block: 'center' }); }
+    });
+    $('#calAddEv').onclick = () => {
+      if (evEdit) { evEdit = null; renderDay(); }
+      const t = $('#calEvTitle'); if (t) { t.focus(); t.scrollIntoView({ block: 'center' }); }
+    };
+    $('#calEvSave').onclick = async () => {
+      const body = { title: $('#calEvTitle').value, date: $('#calEvDate').value, time: $('#calEvTime').value, note: $('#calEvNote').value };
       if (!body.title.trim()) return alertWarn('Chưa nhập tiêu đề', 'Hãy nhập tiêu đề sự kiện.');
       if (!body.date) return alertWarn('Chưa chọn ngày', 'Hãy chọn ngày cho sự kiện.');
       try {
-        if (ev) await api('/api/calendar-events/' + encodeURIComponent(ev.id), { method: 'PUT', body: JSON.stringify(body) });
+        if (evEdit) await api('/api/calendar-events/' + encodeURIComponent(evEdit.id), { method: 'PUT', body: JSON.stringify(body) });
         else await post('/api/calendar-events', body);
-        toast(ev ? 'Đã lưu sự kiện' : 'Đã thêm sự kiện');
-        closeEvForm();
+        toast(evEdit ? 'Đã lưu sự kiện' : 'Đã thêm sự kiện');
+        evEdit = null;
         S.calSel = body.date;
         const [yy, mm] = body.date.split('-').map(Number);
         S.calY = yy; S.calM = mm - 1;
         load();
       } catch (e) { alertErr('Không lưu được sự kiện', e.message); }
     };
+    const evCancelBtn = $('#calEvCancel');
+    if (evCancelBtn) evCancelBtn.onclick = () => { evEdit = null; renderDay(); };
   }
   $('#calPrev').onclick = () => { S.calM--; if (S.calM < 0) { S.calM = 11; S.calY--; } load(); };
   $('#calNext').onclick = () => { S.calM++; if (S.calM > 11) { S.calM = 0; S.calY++; } load(); };
