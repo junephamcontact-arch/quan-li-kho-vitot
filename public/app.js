@@ -1,13 +1,13 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v32.261126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v33.261126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 /* ---------- Ngôn ngữ VI/EN ---------- */
 const I18N = {
-  vi: { dashboard: 'Dashboard', inventory: 'Tra cứu tồn kho', inbound: 'Nhập hàng', outbound: 'Xuất hàng', stocktake: 'Kiểm kho', processing: 'Chế biến / Sơ chế', recon: 'Đối soát đơn', calendar: 'Lịch', history: 'Lịch sử phiếu', settings: 'Cài đặt', logout: 'Đăng xuất', understood: 'Đã hiểu' },
-  en: { dashboard: 'Dashboard', inventory: 'Inventory lookup', inbound: 'Goods receipt', outbound: 'Goods issue', stocktake: 'Stock check', processing: 'Processing', recon: 'Order audit', calendar: 'Calendar', history: 'Slip history', settings: 'Settings', logout: 'Log out', understood: 'OK, got it' }
+  vi: { dashboard: 'Dashboard', inventory: 'Tra cứu tồn kho', inbound: 'Nhập hàng', outbound: 'Xuất hàng', stocktake: 'Kiểm kho', processing: 'Chế biến / Sơ chế', recon: 'Đối soát đơn', calendar: 'Lịch', history: 'Lịch sử phiếu', settings: 'Cài đặt', logout: 'Đăng xuất', understood: 'Đã hiểu', activity: 'Hoạt động nhân viên', goods: 'Hàng hoá & Tồn kho', staffsum: 'Tổng hợp nhân viên' },
+  en: { dashboard: 'Dashboard', inventory: 'Inventory lookup', inbound: 'Goods receipt', outbound: 'Goods issue', stocktake: 'Stock check', processing: 'Processing', recon: 'Order audit', calendar: 'Calendar', history: 'Slip history', settings: 'Settings', logout: 'Log out', understood: 'OK, got it', activity: 'Staff activity', goods: 'Goods & stock', staffsum: 'Staff summary' }
 };
 let lang = localStorage.getItem('qk-lang') || 'vi';
 const t = k => (I18N[lang] && I18N[lang][k]) || I18N.vi[k] || k;
@@ -36,7 +36,7 @@ function fmtAutoTime(d) {
 const fmtKg = n => (Math.round((Number(n) || 0) * 100) / 100).toLocaleString('vi-VN');
 
 /* ---------- Trạng thái ---------- */
-let S = { token: localStorage.getItem('qk-token') || '', user: null, boot: null, products: [], whProducts: [], view: '', slipLines: [], reconCodes: [], reconBusy: false, dashPreset: 'today', dashFrom: '', dashTo: '', calY: 0, calM: 0, calSel: '', calData: { arrivals: [], events: [] } };
+let S = { token: localStorage.getItem('qk-token') || '', user: null, boot: null, products: [], whProducts: [], view: '', slipLines: [], reconCodes: [], reconBusy: false, dashPreset: 'today', dashFrom: '', dashTo: '', monPreset: '7d', monFrom: '', monTo: '', calY: 0, calM: 0, calSel: '', calData: { arrivals: [], events: [] } };
 
 async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + S.token, ...(opts.headers || {}) } });
@@ -90,7 +90,7 @@ async function doSync() {
     const r = await post('/api/sheet-sync');
     S.boot = await api('/api/bootstrap');
     setInvBadge();
-    if (S.view && VIEWS[S.view]) VIEWS[S.view](); // nạp lại dữ liệu đang hiển thị
+    if (S.view) renderView(); // nạp lại dữ liệu đang hiển thị
     await notifySyncDone(r);
   } catch (e) { await alertErr('Đồng bộ thất bại', e.message); }
   finally {
@@ -133,14 +133,31 @@ const NAV = [
   ['dashboard', '▦'], ['inventory', '🔍'], ['inbound', '📥'], ['outbound', '📤'],
   ['stocktake', '🧮'], ['processing', '🔪'], ['recon', '📦'], ['calendar', '🗓️'], ['history', '🕘'], ['settings', '⚙️']
 ];
+/* Menu ADMIN (v33): thuần GIÁM SÁT — KHÔNG có Nhập hàng / Xuất hàng; Kiểm kho / Chế biến /
+   Đối soát mở màn hình theo dõi (ADMIN_VIEWS) thay cho form làm việc của nhân viên kho. */
+const NAV_ADMIN = [
+  ['dashboard', '▦', 'Tổng quan'], ['activity', '👥', 'Hoạt động nhân viên'], ['goods', '📦', 'Hàng hoá & Tồn kho'],
+  ['processing', '🔪', 'Chế biến / Sơ chế'], ['recon', '🧾', 'Đối soát đơn'], ['stocktake', '🧮', 'Kiểm kho'],
+  ['staffsum', '📊', 'Tổng hợp nhân viên'], ['history', '🕘', 'Lịch sử phiếu'], ['inventory', '🔍', 'Tra cứu tồn kho'],
+  ['calendar', '🗓️', 'Lịch'], ['settings', '⚙️', 'Cài đặt']
+];
+function navLabel(key) {
+  if (S.user && S.user.admin) { const f = NAV_ADMIN.find(x => x[0] === key); if (f) return f[2]; }
+  return t(key);
+}
 function buildNav() {
   const nav = $('#nav'); nav.innerHTML = '';
-  for (const [key, icon] of NAV) {
-    if (key !== 'settings' && !S.user.admin && !S.user.perms[key]) continue;
-    if (key === 'dashboard' && !S.user.admin) continue;
+  const items = (S.user && S.user.admin)
+    ? NAV_ADMIN.map(([key, icon, lbl]) => ({ key, icon, lbl }))
+    : NAV.map(([key, icon]) => ({ key, icon, lbl: t(key) }));
+  for (const { key, icon, lbl } of items) {
+    if (!S.user.admin) {
+      if (key !== 'settings' && !S.user.perms[key]) continue;
+      if (key === 'dashboard') continue;
+    }
     const b = document.createElement('button');
     b.className = 'nav-item' + (S.view === key ? ' active' : '');
-    b.innerHTML = `<span>${icon}</span><span>${t(key)}</span>`;
+    b.innerHTML = `<span>${icon}</span><span>${esc(lbl)}</span>`;
     b.onclick = () => { go(key); document.body.classList.remove('nav-open'); $('#sidebar').classList.remove('open'); };
     nav.appendChild(b);
   }
@@ -161,7 +178,13 @@ async function enterApp() {
   setInvBadge();
   go(S.user.admin ? 'dashboard' : (NAV.find(([k]) => k !== 'settings' && S.user.perms[k]) || ['settings'])[0]);
 }
-function go(view) { S.view = view; S.slipLines = []; S.reconCodes = []; S.reconBusy = false; buildNav(); $('#viewTitle').textContent = t(view); VIEWS[view](); window.scrollTo(0, 0); }
+/* Điều phối màn hình: ADMIN mở các màn GIÁM SÁT (ADMIN_VIEWS) cho Kiểm/Chế biến/Đối soát;
+   nhân viên kho giữ nguyên form làm việc trong VIEWS. */
+function renderView() {
+  const fn = (S.user && S.user.admin && typeof ADMIN_VIEWS !== 'undefined' && ADMIN_VIEWS[S.view]) || VIEWS[S.view];
+  if (fn) fn();
+}
+function go(view) { S.view = view; S.slipLines = []; S.reconCodes = []; S.reconBusy = false; buildNav(); $('#viewTitle').textContent = navLabel(view); renderView(); window.scrollTo(0, 0); }
 $('#syncBtn').onclick = () => doSync();
 $('#hamburger').onclick = () => { $('#sidebar').classList.toggle('open'); document.body.classList.toggle('nav-open'); };
 $('#scrim').onclick = () => { $('#sidebar').classList.remove('open'); document.body.classList.remove('nav-open'); };
@@ -237,6 +260,96 @@ function linesEditor(container, renderLine) {
 
 /* ================= CÁC MÀN HÌNH ================= */
 const VIEWS = {};
+const ADMIN_VIEWS = {}; // bản GIÁM SÁT của Kiểm kho / Chế biến / Đối soát — chỉ ADMIN (v33)
+
+/* ---------- Dùng chung cho các màn giám sát ADMIN (v33) ---------- */
+const normName = s => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+function monRange() {
+  const tk = bkkKey(0);
+  switch (S.monPreset) {
+    case 'today': return { from: tk, to: tk };
+    case 'yesterday': return { from: bkkKey(-1), to: bkkKey(-1) };
+    case '30d': return { from: bkkKey(-29), to: tk };
+    case 'month': return { from: tk.slice(0, 8) + '01', to: tk };
+    case 'custom': return { from: S.monFrom || tk, to: S.monTo || tk };
+    default: return { from: bkkKey(-6), to: tk }; // 7d
+  }
+}
+/* Thanh lọc kỳ dùng chung (chip + Tuỳ chọn Từ–Đến) cho các màn giám sát — trạng thái ở S.mon* */
+function mountPeriodBar(box, onChange) {
+  const presets = [['today', 'Hôm nay'], ['yesterday', 'Hôm qua'], ['7d', '7 ngày'], ['30d', '30 ngày'], ['month', 'Tháng này'], ['custom', 'Tuỳ chọn']];
+  box.innerHTML = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+    ${presets.map(([k, lbl]) => `<button class="chip ${S.monPreset === k ? 'active' : ''}" data-mp="${k}">${lbl}</button>`).join('')}
+    <span class="${S.monPreset === 'custom' ? '' : 'hidden'}" style="display:inline-flex;gap:6px;align-items:center">
+      <input class="in mon-from" type="date" value="${esc(S.monFrom)}" style="width:150px;height:30px">
+      <span class="mut">→</span>
+      <input class="in mon-to" type="date" value="${esc(S.monTo)}" style="width:150px;height:30px">
+      <button class="btn primary mon-apply">Áp dụng</button>
+    </span></div>`;
+  box.querySelectorAll('[data-mp]').forEach(c => c.onclick = () => { S.monPreset = c.dataset.mp; mountPeriodBar(box, onChange); if (S.monPreset !== 'custom') onChange(); });
+  const ap = box.querySelector('.mon-apply');
+  if (ap) ap.onclick = () => {
+    const f = box.querySelector('.mon-from').value, tt = box.querySelector('.mon-to').value;
+    if (!f || !tt) return alertWarn('Chưa chọn đủ ngày', 'Hãy chọn cả Từ ngày và Đến ngày.');
+    if (f > tt) return alertWarn('Khoảng ngày không hợp lệ', 'Ngày bắt đầu phải trước hoặc bằng ngày kết thúc.');
+    S.monFrom = f; S.monTo = tt; onChange();
+  };
+}
+/* Trạng thái xử lí chênh lệch (v33 §9): select + ghi chú + Lưu — dùng ở Đối soát & Kiểm kho giám sát */
+const DISC_LBL = { open: 'Chưa xử lí', explained: 'Đã rõ nguyên nhân', resolved: 'Đã xử lí' };
+function discControlHTML(it) {
+  return `<span class="disc-ctl"><select class="in disc-sel" data-disc-id="${esc(it.id)}">${Object.entries(DISC_LBL).map(([k, l]) => `<option value="${k}" ${it.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select><input class="in disc-note" data-disc-note="${esc(it.id)}" placeholder="Ghi chú xử lí…" value="${esc(it.note || '')}"><button class="btn disc-save" data-disc-save="${esc(it.id)}">Lưu</button></span>`;
+}
+function wireDiscControls(root, onSaved) {
+  root.querySelectorAll('[data-disc-save]').forEach(b => b.onclick = async () => {
+    const id = b.dataset.discSave;
+    const sel = root.querySelector(`[data-disc-id="${CSS.escape(id)}"]`);
+    const note = root.querySelector(`[data-disc-note="${CSS.escape(id)}"]`);
+    b.disabled = true;
+    try { await post('/api/admin/discrepancy-status', { id, status: sel ? sel.value : 'open', note: note ? note.value : '' }); toast('Đã lưu trạng thái xử lí'); if (onSaved) onSaved(); }
+    catch (e) { alertErr('Không lưu được trạng thái', e.message); }
+    b.disabled = false;
+  });
+}
+/* ---------- Modal chi tiết phiếu gốc (v33 §10) ---------- */
+function slipDetailHTML(s) {
+  const head = `<div class="mut" style="margin-bottom:8px">${esc(TYPE_LBL[s.type] || s.type)} • Kho: <b>${esc(s.warehouse || '—')}</b> • ${esc(s.createdAt || '')} • Người làm: <b>${esc(s.creatorName || '')}</b> ${wsPill(s)}</div>
+    ${s.type === 'in' ? `<div class="mut">Nhà cung cấp: ${esc(s.supplier || '—')}${s.expectedDate ? ` • Ngày về dự kiến: ${esc(s.expectedDate)}` : ''}${s.checker ? ` • Người kiểm: ${esc(s.checker)}` : ''}</div>` : ''}
+    ${s.type === 'out' ? `<div class="mut">Phân loại: ${esc(s.exportType || '—')} • Nơi nhận: ${esc(s.recipient || '—')}</div>` : ''}
+    ${s.note ? `<div class="mut">Ghi chú: ${esc(s.note)}</div>` : ''}
+    ${s.writeStatus === 'error' ? `<div style="color:var(--red);font-weight:600;margin-top:4px">Ghi lỗi Sheet: ${esc(s.writeError || '')}</div>` : ''}`;
+  let tbl = '';
+  if (s.type === 'check') {
+    tbl = `<table class="tbl"><tr><th>Sản phẩm</th><th>Đếm thực tế</th><th>Tồn hệ thống</th><th>Chênh lệch</th></tr>${(s.lines || []).map(l => `<tr><td>${esc(l.name)}</td><td>${l.counted}</td><td>${l.systemStock ?? ''}</td><td>${l.variance !== undefined ? (l.variance > 0 ? '+' : '') + l.variance : ''}</td></tr>`).join('')}</table>`;
+  } else if (s.type === 'process') {
+    tbl = `<table class="tbl"><tr><th>Nguyên liệu</th><th>Đầu vào</th><th>Thành phẩm</th><th>Bán được</th><th>Hủy</th><th>Hao hụt</th></tr>${(s.lines || []).map(l => `<tr><td>${esc(l.name)}</td><td>${l.inputQty}</td><td>${esc(l.finishedName || '')}${l.posQty ? ` (${l.posQty})` : ''}</td><td>${l.usable} (${l.usablePct}%)</td><td>${l.discard} (${l.discardPct}%)</td><td>${l.loss} (${l.lossPct}%)</td></tr>`).join('')}</table>`;
+  } else if (s.type === 'recon') {
+    tbl = `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${(s.lines || []).map(l => `<span class="recon-chip"><b>${esc(l.code)}</b></span>`).join('') || '<span class="mut">Không có mã nào.</span>'}</div><div class="mut" style="margin-top:6px">Tổng: ${(s.lines || []).length} mã quét</div>`;
+  } else {
+    tbl = `<table class="tbl"><tr><th>Sản phẩm</th><th>Mã mẫu</th><th>Số lượng</th><th>ĐVT</th><th>Ghi chú</th></tr>${(s.lines || []).map(l => `<tr><td>${esc(l.name)}</td><td>${esc(l.sampleCode || '')}</td><td>${l.qty}</td><td>${esc(l.unit || '')}</td><td>${esc(l.note || '')}</td></tr>`).join('')}</table>`;
+  }
+  return head + tbl;
+}
+async function openSlipModal(code, type) {
+  const wrap = $('#slipWrap'); if (!wrap) return;
+  $('#slipTitle').textContent = 'Chi tiết phiếu ' + code;
+  $('#slipBody').innerHTML = '<p class="mut">Đang tải…</p>';
+  wrap.classList.add('show');
+  try {
+    const r = await api('/api/slip?code=' + encodeURIComponent(code) + (type ? '&type=' + encodeURIComponent(type) : ''));
+    $('#slipTitle').textContent = 'Chi tiết phiếu ' + r.slip.code;
+    $('#slipBody').innerHTML = slipDetailHTML(r.slip);
+  } catch (e) { $('#slipBody').innerHTML = `<p>${esc(e.message)}</p>`; }
+}
+function closeSlipModal() { const w = $('#slipWrap'); if (w) w.classList.remove('show'); }
+function slipLinkHTML(code, type) { return `<span class="pill link" data-slip-link="${esc(code)}" data-slip-type="${esc(type || '')}">${esc(code)}</span>`; }
+function wireSlipLinks(root) {
+  root.querySelectorAll('[data-slip-link]').forEach(el => el.onclick = e => { e.stopPropagation(); openSlipModal(el.dataset.slipLink, el.dataset.slipType || ''); });
+}
+if ($('#slipClose')) {
+  $('#slipClose').onclick = closeSlipModal;
+  $('#slipWrap').addEventListener('click', e => { if (e.target.id === 'slipWrap') closeSlipModal(); });
+}
 
 /* ---------- Dashboard (ADMIN): bộ lọc thời gian chung + hiệu suất chế biến + đối soát ---------- */
 function dashRange() {
@@ -277,10 +390,41 @@ VIEWS.dashboard = async () => {
     const body = $('#dashBody'); if (!body || S.view !== 'dashboard') return;
     try {
       const d = await api(`/api/dashboard?from=${from}&to=${to}`);
+      const ov = await api(`/api/admin/overview?from=${from}&to=${to}`).catch(() => null);
       const stat = (num, lbl) => `<div class="card stat"><div class="num">${num}</div><div class="lbl">${lbl}</div></div>`;
       const maxBar = Math.max(1, ...d.chart.map(c => Math.max(c.in, c.out)));
       const cb = d.cheBienStats;
-      body.innerHTML = `
+      /* ---- Khối CHỈ SỐ KIỂM SOÁT KHO (v33): 6 thẻ KPI cho lãnh đạo ---- */
+      let kpiHtml = '';
+      if (ov) {
+        const K = ov.kpis;
+        const lightColor = l => l === 'green' ? 'var(--green)' : l === 'yellow' ? 'var(--amber)' : l === 'red' ? 'var(--red)' : 'var(--border)';
+        const deltaHtml = (k, lowerBetter, unit) => {
+          if (k.value == null) return '<div class="kpi-delta mut">Chưa có dữ liệu trong kỳ</div>';
+          if (k.delta == null) return '<div class="kpi-delta mut">— chưa có dữ liệu kỳ trước</div>';
+          if (k.delta === 0) return '<div class="kpi-delta mut">▬ Không đổi so với kỳ trước</div>';
+          const up = k.delta > 0;
+          const good = lowerBetter ? !up : up;
+          return `<div class="kpi-delta ${good ? 'good' : 'bad'}">${up ? '▲' : '▼'} ${Math.abs(k.delta)}${unit || ' điểm'} so với kỳ trước</div>`;
+        };
+        const pct = v => v == null ? '—' : v + '%';
+        const card = (name, k, valTxt, delta, extra) => `<div class="card kpi-card" style="border-left:5px solid ${lightColor(k.light)}">
+          <div class="kpi-name"><span class="kpi-dot" style="background:${lightColor(k.light)}"></span>${name}</div>
+          <div class="kpi-val">${valTxt}</div>${delta}<div class="kpi-extra">${extra || ''}</div></div>`;
+        kpiHtml = `<div class="mut" style="margin-bottom:6px"><b style="color:var(--text);font-size:14.5px">CHỈ SỐ KIỂM SOÁT KHO</b> — kỳ ${esc(ov.period.from)} → ${esc(ov.period.to)} (so với kỳ trước ${esc(ov.prevPeriod.from)} → ${esc(ov.prevPeriod.to)}):</div>
+        <div class="kpis">
+          ${card('Độ chính xác tồn kho', K.accuracy, pct(K.accuracy.value), deltaHtml(K.accuracy, false), `${K.accuracy.extra.lines} dòng kiểm trong kỳ`)}
+          ${card('Tỉ lệ hao hụt', K.shrinkage, pct(K.shrinkage.value), deltaHtml(K.shrinkage, true), `Lệch thiếu kiểm ${fmtKg(K.shrinkage.extra.negVar)} + hao hụt chế biến ${fmtKg(K.shrinkage.extra.processLoss)} Kg`)}
+          ${card('Chênh lệch cửa hàng ↔ POS', K.posDiff, pct(K.posDiff.value), '<div class="kpi-delta mut">— số liệu hiện tại, không so kỳ trước</div>', `Lệch ${K.posDiff.extra.mismatchCount} / ${K.posDiff.extra.totalRows} mặt hàng`)}
+          ${card('Tỉ lệ thành phẩm bán được (chế biến)', K.yield, pct(K.yield.value), deltaHtml(K.yield, false), `${K.yield.extra.batches} mẻ • Đầu vào ${fmtKg(K.yield.extra.inputKg)} Kg • Hủy ${K.yield.extra.discardPct ?? '—'}% • Hao hụt ${K.yield.extra.lossPct ?? '—'}%`)}
+          ${card('Tỉ lệ đối soát đủ đơn', K.recon, pct(K.recon.value), deltaHtml(K.recon, false), `Đã quét khớp ${K.recon.extra.matched} / ${K.recon.extra.expected} đơn POS kỳ vọng`)}
+          ${card('Vụ bất thường còn treo', K.openIssues, String(K.openIssues.value), '<div class="kpi-delta mut">— số liệu hiện tại, không so kỳ trước</div>', K.openIssues.value ? `Vụ lâu nhất đã treo ${K.openIssues.extra.oldestDays} ngày` : 'Không còn vụ nào chưa xử lí')}
+        </div>
+        <div class="mut" style="margin:6px 0 12px">Ngưỡng đèn là mức mặc định do quản lí đặt (xanh = đạt, vàng = chú ý, đỏ = cần can thiệp). Tỉ lệ hao hụt tính theo SỐ LƯỢNG — hệ thống chưa có dữ liệu giá vốn nên chưa quy ra tiền.</div>`;
+        var alertsHtml = ov.alerts && ov.alerts.length ? `<div class="card" style="margin-top:12px"><b>HỘP CẢNH BÁO</b> <span class="badge r">${ov.alerts.length}</span>
+          ${ov.alerts.map(a => `<div class="alert-item ${a.severity === 'red' ? 'red' : 'yellow'}" data-alert-go="${esc(a.target || '')}"><span class="al-dot"></span><span>${esc(a.text)}</span></div>`).join('')}</div>` : '';
+      }
+      body.innerHTML = `${kpiHtml || ''}` + `
       <div class="mut" style="margin-bottom:6px">Số tồn kho (hiện tại, không lọc theo thời gian):</div>
       <div class="stats">
         ${stat(d.totalProducts, 'Tổng sản phẩm')}${stat(d.totalStock.toLocaleString('vi-VN'), 'Tổng tồn kho')}
@@ -309,8 +453,202 @@ VIEWS.dashboard = async () => {
       <div class="grid2" style="margin-top:12px">
         <div class="card"><b>Sắp hết hàng</b>${d.lowStockList.length ? `<table class="tbl"><tr><th>Sản phẩm</th><th>Tồn</th></tr>${d.lowStockList.map(i => `<tr><td>${esc(i.name)}${i.variant ? ' — ' + esc(i.variant) : ''}</td><td><span class="badge y">${i.stock}</span></td></tr>`).join('')}</table>` : '<p class="mut">Không có.</p>'}</div>
         <div class="card"><b>Hoạt động gần đây</b>${d.recent.length ? d.recent.map(s => `<p style="margin:8px 0"><span class="pill">${esc(s.code)}</span> ${esc(s.creatorName)} • ${esc(s.createdAt)} ${wsPill(s)}</p>`).join('') : '<p class="mut">Chưa có phiếu nào.</p>'}</div>
-      </div>`;
+      </div>` + (typeof alertsHtml !== 'undefined' ? alertsHtml : '');
+      body.querySelectorAll('[data-alert-go]').forEach(el => el.onclick = () => { const tg = el.dataset.alertGo; if (tg && (VIEWS[tg] || ADMIN_VIEWS[tg])) go(tg); });
     } catch (e) { body.innerHTML = `<div class="card">${esc(e.message)}</div>`; }
+  }
+  load();
+};
+
+/* ---------- Hoạt động nhân viên (ADMIN, v33 §3) ---------- */
+const ACT_LBL = { in: 'Nhập hàng', out: 'Xuất hàng', check: 'Kiểm kho', process: 'Chế biến', recon: 'Đối soát đơn' };
+const ACT_CLS = { in: 'act-in', out: 'act-out', check: 'act-check', process: 'act-proc', recon: 'act-recon' };
+VIEWS.activity = async () => {
+  const v = $('#view'); v.className = 'view';
+  v.innerHTML = `<div class="card"><div id="actBar"></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
+      <div class="field" style="width:210px;margin-bottom:0"><label class="f">Nhân viên</label><select class="in" id="actUser"><option value="">Tất cả nhân viên</option>${(S.boot.staffNames || []).map(n => `<option>${esc(n)}</option>`).join('')}</select></div>
+      <div class="field" style="width:210px;margin-bottom:0"><label class="f">Loại hành động</label><select class="in" id="actType"><option value="">Tất cả</option>${Object.entries(ACT_LBL).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div>
+    </div>
+    <div id="actList">Đang tải…</div></div>`;
+  mountPeriodBar($('#actBar'), load);
+  async function load() {
+    const box = $('#actList'); if (!box || S.view !== 'activity') return;
+    const { from, to } = monRange();
+    const q = new URLSearchParams({ from, to });
+    if ($('#actUser').value) q.set('user', $('#actUser').value);
+    if ($('#actType').value) q.set('type', $('#actType').value);
+    try {
+      const r = await api('/api/admin/activity?' + q.toString());
+      box.innerHTML = r.items.length ? `<table class="tbl"><tr><th>Giờ</th><th>Nhân viên</th><th>Hành động</th><th>Chi tiết</th><th>Mã phiếu</th></tr>${r.items.map(i => `<tr><td style="white-space:nowrap">${esc(i.at)}</td><td><b>${esc(i.user)}</b></td><td><span class="act-chip ${ACT_CLS[i.type] || ''}">${ACT_LBL[i.type] || i.type}</span></td><td>${esc(i.summary)}</td><td>${slipLinkHTML(i.code, i.type)}</td></tr>`).join('')}</table>` : '<p class="mut">Không có hoạt động nào trong kỳ.</p>';
+      wireSlipLinks(box);
+    } catch (e) { box.innerHTML = `<p>${esc(e.message)}</p>`; }
+  }
+  $('#actUser').onchange = load;
+  $('#actType').onchange = load;
+  load();
+};
+
+/* ---------- Hàng hoá & Tồn kho (ADMIN, v33 §4): tab Kho cửa hàng + từng kho POS + THẺ KHO ---------- */
+VIEWS.goods = async () => {
+  const v = $('#view'); v.className = 'view';
+  v.innerHTML = `<div class="card">
+    <div class="wh-tabs" id="gTabs"></div>
+    <div class="mut hidden" id="gPosNote" style="margin:8px 0">Số tồn POS là TỔNG tồn của sản phẩm trên Pancake POS — dữ liệu Sheet hiện chưa tách riêng số tồn cho từng kho.</div>
+    <div id="gBody">Đang tải…</div></div>
+  <div id="gCard"></div>`;
+  await loadProducts(false); // payload ADMIN: warehouses[] + unit + tồn/bán POS
+  await loadWhProducts(false);
+  const inv = await api('/api/inventory').catch(() => null);
+  const pcRows = inv && inv.posCompare ? inv.posCompare.rows : [];
+  const pcMap = new Map(pcRows.map(r => [r.code + '\u0002' + normName(r.name), r]));
+  const posWarehouses = [...new Set(S.products.flatMap(p => p.warehouses || []))];
+  let tab = 'store';
+  function renderTabs() {
+    const tabs = [['store', 'Kho cửa hàng'], ...posWarehouses.map(w => ['pos:' + w, w + ' (POS)'])];
+    $('#gTabs').innerHTML = tabs.map(([k, l]) => `<button class="chip ${tab === k ? 'active' : ''}" data-gt="${esc(k)}">${esc(l)}</button>`).join('');
+    $$('#gTabs [data-gt]').forEach(b => b.onclick = () => { tab = b.dataset.gt; renderTabs(); renderBody(); });
+    $('#gPosNote').classList.toggle('hidden', tab === 'store');
+  }
+  function renderBody() {
+    const box = $('#gBody'); if (!box) return;
+    if (tab === 'store') {
+      const groups = new Map();
+      for (const e of S.whProducts) {
+        const k = e.code + '\u0002' + normName(e.name);
+        let g = groups.get(k);
+        if (!g) { g = { code: e.code, name: e.name, unit: e.unit || '', warehouse: e.warehouse, totalIn: 0, totalOut: 0, balance: 0 }; groups.set(k, g); }
+        g.totalIn += Number(e.totalIn) || 0; g.totalOut += Number(e.totalOut) || 0; g.balance += Number(e.balance) || 0;
+      }
+      const rows = [...groups.values()].map(g => {
+        const pc = pcMap.get(g.code + '\u0002' + normName(g.name));
+        const pos = pc ? pc.posStock : 0;
+        return { ...g, pos, diff: Math.round((g.balance - pos) * 1000) / 1000 };
+      });
+      for (const [k, pc] of pcMap) if (!groups.has(k)) rows.push({ code: pc.code, name: pc.name, unit: pc.unit || '', warehouse: '', totalIn: 0, totalOut: 0, balance: 0, pos: pc.posStock, diff: -pc.posStock });
+      rows.sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff) || a.name.localeCompare(b.name, 'vi'));
+      box.innerHTML = `<table class="tbl"><tr><th>Sản phẩm</th><th>Tổng nhập</th><th>Tổng xuất</th><th>Tồn cửa hàng</th><th>Tồn POS</th><th>Chênh lệch</th></tr>${rows.map(r => `<tr class="clickable" data-gcard="${esc(r.code)}" data-gname="${esc(r.name)}" data-gwh="${esc(r.warehouse || '')}"><td><b>${esc(r.name)}</b><div class="mut">${esc(r.code || '')}${r.unit ? ' • ' + esc(r.unit) : ''}</div></td><td>${fmtKg(r.totalIn)}</td><td>${fmtKg(r.totalOut)}</td><td><span class="badge ${r.balance > 0 ? 'g' : r.balance < 0 ? 'r' : 'y'}">${fmtKg(r.balance)}</span></td><td>${fmtKg(r.pos)}</td><td><span class="badge ${r.diff === 0 ? 'g' : 'r'}">${r.diff > 0 ? '+' : ''}${fmtKg(r.diff)}</span></td></tr>`).join('') || '<tr><td colspan="6" class="mut">Chưa có dữ liệu.</td></tr>'}</table>
+      <div class="mut" style="margin-top:6px">Bấm vào 1 dòng để mở THẺ KHO của sản phẩm.</div>`;
+    } else {
+      const whName = tab.slice(4);
+      const groups = new Map();
+      for (const p of S.products) {
+        if (!(p.warehouses || []).includes(whName)) continue;
+        const label = p.variant ? `${p.name} (${p.variant})` : p.name;
+        const k = (p.sampleCode || p.sku || '') + '\u0002' + normName(label);
+        let g = groups.get(k);
+        if (!g) { g = { name: label, code: p.sampleCode || p.sku || '', unit: p.unit || '', stock: 0, sellable: 0, warehouses: new Set() }; groups.set(k, g); }
+        g.stock += Number(p.stock) || 0; g.sellable += Number(p.sellable) || 0;
+        (p.warehouses || []).forEach(w => g.warehouses.add(w));
+      }
+      const rows = [...groups.values()];
+      box.innerHTML = `<table class="tbl"><tr><th>Sản phẩm</th><th>ĐVT</th><th>Tồn POS</th><th>Có thể bán</th><th>Kho thao tác</th></tr>${rows.map(r => `<tr class="clickable" data-gcard="${esc(r.code)}" data-gname="${esc(r.name)}" data-gwh=""><td><b>${esc(r.name)}</b><div class="mut">${esc(r.code || '')}</div></td><td>${esc(r.unit) || '—'}</td><td>${fmtKg(r.stock)}</td><td>${fmtKg(r.sellable)}</td><td class="mut">${[...r.warehouses].filter(w => w !== whName).join(', ') || '—'}</td></tr>`).join('') || '<tr><td colspan="5" class="mut">Không có sản phẩm nào thuộc kho này trên POS.</td></tr>'}</table>`;
+    }
+    box.querySelectorAll('[data-gcard]').forEach(tr => tr.onclick = () => openStockCard(tr.dataset.gwh, tr.dataset.gcard, tr.dataset.gname));
+  }
+  async function openStockCard(wh, code, name) {
+    const box = $('#gCard'); if (!box) return;
+    box.innerHTML = '<div class="card" style="margin-top:12px">Đang tải thẻ kho…</div>';
+    try {
+      const r = await api(`/api/admin/stock-card?warehouse=${encodeURIComponent(wh || '')}&code=${encodeURIComponent(code || '')}&name=${encodeURIComponent(name || '')}`);
+      const e = r.entry;
+      const EV_LBL = { nhap: 'Nhập', xuat: 'Xuất', 'chebien-out': 'Chế biến — nguyên liệu ra', 'chebien-in': 'Chế biến — thành phẩm vào', kiem: 'Kiểm kho' };
+      box.innerHTML = `<div class="card" style="margin-top:12px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><b>THẺ KHO — ${esc(e.name)}</b><span class="pill">${esc(e.code || '')}</span><span class="mut">${esc(e.warehouse || '')}</span></div>
+        <div class="stats" style="margin-top:10px">
+          <div class="card stat"><div class="num">${fmtKg(e.stock)}</div><div class="lbl">Tồn cửa hàng hiện tại ${esc(e.unit || '')}</div></div>
+          <div class="card stat"><div class="num">${fmtKg(e.totalIn)}</div><div class="lbl">Tổng đã nhập</div></div>
+          <div class="card stat"><div class="num">${fmtKg(e.totalOut)}</div><div class="lbl">Tổng đã xuất</div></div>
+          <div class="card stat"><div class="num">${fmtKg(e.posStock)}</div><div class="lbl">Tồn POS hiện tại</div></div>
+        </div>
+        ${r.events.length ? `<div style="overflow-x:auto"><table class="tbl" style="margin-top:10px"><tr><th>Thời gian</th><th>Loại</th><th>Phiếu</th><th>Người làm</th><th>Biến động</th><th>Tồn sau</th><th>Ghi chú</th></tr>${r.events.map(ev => `<tr><td style="white-space:nowrap">${esc(ev.at)}</td><td>${EV_LBL[ev.type] || ev.type}</td><td>${slipLinkHTML(ev.code, '')}</td><td>${esc(ev.by || '')}</td><td>${ev.type === 'kiem' ? '—' : (ev.delta > 0 ? '+' : '') + fmtKg(ev.delta)}</td><td><b>${fmtKg(ev.balanceAfter)}</b></td><td class="mut">${ev.type === 'kiem' ? `Đếm ${ev.counted} · Tồn sổ lúc kiểm ${ev.book}` : ''}</td></tr>`).join('')}</table></div>` : '<p class="mut" style="margin-top:8px">Sản phẩm chưa có biến động ở kho cửa hàng.</p>'}
+      </div>`;
+      wireSlipLinks(box);
+      box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (err) { box.innerHTML = `<div class="card" style="margin-top:12px">${esc(err.message)}</div>`; }
+  }
+  renderTabs(); renderBody();
+};
+
+/* ---------- Chế biến — GIÁM SÁT (ADMIN, v33 §5); nhân viên kho vẫn dùng form ở VIEWS.processing ---------- */
+ADMIN_VIEWS.processing = async () => {
+  const v = $('#view'); v.className = 'view';
+  v.innerHTML = `<div class="card"><div id="pmBar"></div><div id="pmBody">Đang tải…</div></div>`;
+  mountPeriodBar($('#pmBar'), load);
+  async function load() {
+    const box = $('#pmBody'); if (!box || S.view !== 'processing') return;
+    const { from, to } = monRange();
+    try {
+      const r = await api(`/api/history?type=process&from=${from}&to=${to}`);
+      let tIn = 0, tUse = 0, tDis = 0, tLoss = 0;
+      const rowsHtml = [];
+      for (const s of r.slips) for (const l of s.lines || []) {
+        tIn += Number(l.inputQty) || 0; tUse += Number(l.usable) || 0; tDis += Number(l.discard) || 0; tLoss += Number(l.loss) || 0;
+        rowsHtml.push(`<tr><td>${slipLinkHTML(s.code, 'process')}</td><td style="white-space:nowrap">${esc(s.createdAt)}</td><td>${esc(s.creatorName)}</td><td>${fmtKg(l.inputQty)}</td><td>${fmtKg(l.usable)} (${l.usablePct}%)</td><td>${fmtKg(l.discard)} (${l.discardPct}%)</td><td>${l.lossPct}%<div class="cb-bar" style="margin-top:4px;min-width:110px"><span class="seg-use" style="width:${l.usablePct}%"></span><span class="seg-dis" style="width:${l.discardPct}%"></span><span class="seg-loss" style="width:${l.lossPct}%"></span></div></td></tr>`);
+      }
+      const pctT = x => tIn > 0 ? Math.round(x / tIn * 1000) / 10 : 0;
+      box.innerHTML = rowsHtml.length ? `<div style="overflow-x:auto"><table class="tbl"><tr><th>Mã mẻ</th><th>Giờ</th><th>Người làm</th><th>Đầu vào (Kg)</th><th>Bán được</th><th>Hủy</th><th>Hao hụt</th></tr>${rowsHtml.join('')}<tr style="font-weight:700"><td colspan="3">TỔNG KỲ</td><td>${fmtKg(tIn)}</td><td>${fmtKg(tUse)} (${pctT(tUse)}%)</td><td>${fmtKg(tDis)} (${pctT(tDis)}%)</td><td>${pctT(tLoss)}%</td></tr></table></div>` : '<p class="mut">Không có mẻ chế biến nào trong kỳ.</p>';
+      wireSlipLinks(box);
+    } catch (e) { box.innerHTML = `<p>${esc(e.message)}</p>`; }
+  }
+  load();
+};
+
+/* ---------- Đối soát — GIÁM SÁT (ADMIN, v33 §6): POS báo ↔ đã quét theo ngày ---------- */
+ADMIN_VIEWS.recon = async () => {
+  const v = $('#view'); v.className = 'view';
+  v.innerHTML = `<div id="rcBar"></div><div id="rcBody">Đang tải…</div>`;
+  mountPeriodBar($('#rcBar'), load);
+  async function load() {
+    const box = $('#rcBody'); if (!box || S.view !== 'recon') return;
+    const { from, to } = monRange();
+    try {
+      const r = await api(`/api/admin/recon-check?from=${from}&to=${to}`);
+      box.innerHTML = r.days.map(d => `<div class="card" style="margin-bottom:12px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><b>Ngày ${esc(d.date)}</b>
+        <span class="pill">POS báo: ${d.expectedCount}</span><span class="pill">Đã quét: ${d.scannedDistinct} đơn (${d.scannedRows} mã)</span>
+        <span class="pill ${d.missing.length ? 'warn' : ''}">Thiếu: ${d.missing.length}</span><span class="pill ${d.extra.length ? 'warn' : ''}">Thừa: ${d.extra.length}</span><span class="pill ${d.duplicates ? 'warn' : ''}">Quét trùng: ${d.duplicates}</span></div>
+        ${!d.hasExpected ? '<div class="mut" style="margin-top:6px">Chưa có dữ liệu đơn POS cho ngày này (tab ĐƠN_POS_ẨN trống) — chỉ có số đã quét.</div>' : ''}
+        ${d.missingItems.length ? `<div style="margin-top:8px"><b>Đơn còn thiếu:</b>${d.missingItems.map(m => `<div class="disc-row"><span class="pill warn">${esc(m.code)}</span>${discControlHTML(m)}</div>`).join('')}</div>` : ''}
+        ${d.extra.length ? `<div class="mut" style="margin-top:6px">Đơn quét thừa (không có trong danh sách POS): ${d.extra.map(x => esc(x)).join(', ')}</div>` : ''}
+      </div>`).join('') || '<p class="mut">Không có ngày nào trong kỳ.</p>';
+      wireDiscControls(box, load);
+    } catch (e) { box.innerHTML = `<div class="card">${esc(e.message)}</div>`; }
+  }
+  load();
+};
+
+/* ---------- Kiểm kho — GIÁM SÁT (ADMIN, v33 §7): đếm thực tế ↔ tồn sổ ↔ tồn POS ---------- */
+ADMIN_VIEWS.stocktake = async () => {
+  const v = $('#view'); v.className = 'view';
+  v.innerHTML = `<div class="card"><div id="ckBar"></div><div id="ckBody">Đang tải…</div></div>`;
+  mountPeriodBar($('#ckBar'), load);
+  async function load() {
+    const box = $('#ckBody'); if (!box || S.view !== 'stocktake') return;
+    const { from, to } = monRange();
+    try {
+      const r = await api(`/api/admin/checks?from=${from}&to=${to}`);
+      const badge = x => `<span class="badge ${x === 0 ? 'g' : 'r'}">${x > 0 ? '+' : ''}${fmtKg(x)}</span>`;
+      box.innerHTML = r.items.length ? `<div style="overflow-x:auto"><table class="tbl"><tr><th>Phiếu</th><th>Giờ</th><th>Người kiểm</th><th>Sản phẩm</th><th>Tồn sổ</th><th>Đếm thực tế</th><th>Lệch sổ</th><th>Tồn POS</th><th>Lệch POS</th><th>Trạng thái xử lí</th></tr>${r.items.map(i => `<tr><td>${slipLinkHTML(i.slipCode, 'check')}</td><td style="white-space:nowrap">${esc(i.at)}</td><td>${esc(i.user)}</td><td><b>${esc(i.name)}</b><div class="mut">${esc(i.warehouse || '')}</div></td><td>${fmtKg(i.book)}</td><td>${fmtKg(i.counted)}</td><td>${badge(i.varBook)}</td><td>${fmtKg(i.posNow)}</td><td>${badge(i.varPos)}</td><td>${i.varBook !== 0 ? discControlHTML({ id: i.discrepancyId, status: i.status, note: i.note }) : '<span class="pill">Khớp</span>'}</td></tr>`).join('')}</table></div>` : '<p class="mut">Không có dòng kiểm kho nào trong kỳ.</p>';
+      wireSlipLinks(box);
+      wireDiscControls(box, load);
+    } catch (e) { box.innerHTML = `<p>${esc(e.message)}</p>`; }
+  }
+  load();
+};
+
+/* ---------- Tổng hợp nhân viên (ADMIN, v33 §8) ---------- */
+VIEWS.staffsum = async () => {
+  const v = $('#view'); v.className = 'view';
+  v.innerHTML = `<div class="card"><div id="ssBar"></div><div id="ssBody">Đang tải…</div></div>`;
+  mountPeriodBar($('#ssBar'), load);
+  async function load() {
+    const box = $('#ssBody'); if (!box || S.view !== 'staffsum') return;
+    const { from, to } = monRange();
+    try {
+      const r = await api(`/api/admin/staff-summary?from=${from}&to=${to}`);
+      box.innerHTML = r.rows.length ? `<table class="tbl"><tr><th>Nhân viên</th><th>Phiếu nhập</th><th>Phiếu xuất</th><th>Kiểm kho</th><th>Chế biến</th><th>Đối soát</th></tr>${r.rows.map(x => `<tr><td><b>${esc(x.name)}</b></td><td>${x.in}</td><td>${x.out}</td><td>${x.check} phiếu • ${x.checkLines} dòng • ${x.checkVarLines} dòng lệch</td><td>${x.process} mẻ • hủy ${x.discardPct}%</td><td>${x.recon} phiên • ${x.reconCodes} mã quét</td></tr>`).join('')}</table>` : '<p class="mut">Chưa có hoạt động nào trong kỳ.</p>';
+    } catch (e) { box.innerHTML = `<p>${esc(e.message)}</p>`; }
   }
   load();
 };
@@ -984,7 +1322,7 @@ VIEWS.history = async () => {
       // ở dòng đầu để bấm được không cần mở; bấm dòng đầu (trừ nút Ghi lại) mới mở chi tiết.
       const retryBtn = s.writeStatus !== 'written' ? `<button class="btn" data-retry="${s.id}" title="Ghi lại phiếu này xuống Sheet">↻ Ghi lại</button>` : '';
       return `<div class="slip-acc">
-        <div class="slip-acc-head" data-acc-head><span class="pill">${esc(s.code)}</span><b>${TYPE_LBL[s.type]}</b>
+        <div class="slip-acc-head" data-acc-head>${slipLinkHTML(s.code, s.type)}<b>${TYPE_LBL[s.type]}</b>
         <span class="mut">${esc(s.warehouse || '')}</span><span class="mut">${esc(s.createdAt)}</span>
         <span class="mut">• ${esc(s.creatorName)}</span>${retryBtn}
         <span style="margin-left:auto">${wsPill(s)}</span><span class="chev">▾</span></div>
@@ -999,6 +1337,7 @@ VIEWS.history = async () => {
       if (e.target.closest('[data-retry]')) return; // bấm Ghi lại thì không mở/thu phiếu
       h.parentElement.classList.toggle('open');
     });
+    wireSlipLinks($('#hList')); // bấm mã phiếu → mở modal chi tiết phiếu gốc (v33)
     $$('#hList [data-retry]').forEach(b => b.onclick = async () => {
       b.disabled = true;
       try { const r = await post(`/api/slips/${encodeURIComponent(b.dataset.retry)}/retry-write`); await alertOk('Đã ghi lại thành công', `Phiếu ${r.slip.code} đã ghi xuống Sheet lúc ${r.slip.writtenAt}.`); load(); }
