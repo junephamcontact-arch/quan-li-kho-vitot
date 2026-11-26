@@ -1,5 +1,5 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v30.261126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v32.261126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -76,8 +76,8 @@ function notifySyncDone(r) {
   const slipsLine = r.slips !== undefined && r.slips !== null ? `\nĐã đọc ${r.slips} phiếu từ các tab phiếu.` : '';
   return alertOk('Đồng bộ hoàn tất', `Đã đồng bộ ${r.count} sản phẩm từ tab TỒN_KHO_POS.${slipsLine}\nHoàn tất lúc: ${r.syncedAt || ''}`);
 }
-/* Đồng bộ THỦ CÔNG — MỘT cơ chế duy nhất cho mọi nút đồng bộ (nút "Đồng bộ" trên thanh đầu,
-   nút "Làm mới từ Sheet" ở Tra cứu, nút trong Cài đặt): đọc lại toàn bộ Sheet qua /api/sheet-sync,
+/* Đồng bộ THỦ CÔNG — MỘT cơ chế duy nhất cho mọi nút đồng bộ (nút "Đồng bộ" trên thanh đầu
+   và nút trong Cài đặt): đọc lại toàn bộ Sheet qua /api/sheet-sync,
    nạp lại bootstrap + chip tồn kho, vẽ lại màn hình đang mở (giữ nguyên dữ liệu đang soạn trong S),
    rồi bật thông báo hoàn tất đúng 1 lần. Đang chạy thì khoá, bấm thêm không chạy đợt mới. */
 let syncing = false;
@@ -328,7 +328,6 @@ VIEWS.inventory = async () => {
       <button class="chip active" data-f="all">Tất cả sản phẩm (<span id="cAll">0</span>)</button>
       <button class="chip" data-f="available">Còn hàng (&gt;0) (<span id="cAv">0</span>)</button>
       <button class="chip" data-f="out">Hết / âm kho (≤0) (<span id="cOut">0</span>)</button>
-      ${S.user.admin ? '<button class="btn" id="invRefresh" style="margin-left:auto">↻ Làm mới từ Sheet</button>' : ''}
     </div>
     <div class="mut" id="invMeta" style="margin-top:10px"></div>
     <div class="inv-summary" id="invSummary"></div>
@@ -337,6 +336,32 @@ VIEWS.inventory = async () => {
   </div>
   <div id="invPosWrap"></div>`;
   let filter = 'all', page = 1;
+  let pcOnlyDiff = false; // công tắc "Chỉ hiện dòng có chênh lệch" của khối đối chiếu POS (chỉ ADMIN)
+  let lastPc = null;      // dữ liệu đối chiếu của lần tải gần nhất — công tắc lọc HIỂN THỊ ngay tại client, không gọi lại API
+  const PC_CAP = 100;     // chưa gõ tìm kiếm: chỉ render tối đa ngần này dòng đối chiếu đầu tiên (đã sắp xếp lệch lớn nhất trước)
+  /* Khối đối chiếu kho POS chính — server CHỈ trả posCompare cho ADMIN; nhân viên không thấy khối này.
+     rows từ server đã lọc theo ô tìm kiếm chính; tại đây chỉ lọc thêm công tắc lệch + giới hạn hiển thị. */
+  function renderPc() {
+    const pw = $('#invPosWrap');
+    if (!pw) return;
+    if (!lastPc) { pw.innerHTML = ''; return; }
+    const pc = lastPc;
+    const totalAll = pc.totalRows != null ? pc.totalRows : pc.rows.length; // tổng kết "Lệch: X / Y" luôn trên TOÀN BỘ danh sách
+    let rows = pc.rows;
+    if (pcOnlyDiff) rows = rows.filter(x => x.diff !== 0);
+    const qVal = (($('#invQ') || {}).value || '').trim();
+    const capped = !qVal && rows.length > PC_CAP;
+    const shown = capped ? rows.slice(0, PC_CAP) : rows;
+    const prows = shown.map(x => `<tr class="${x.diff !== 0 ? 'diffrow' : ''}"><td>${esc(x.code) || '—'}</td><td><b>${esc(x.name)}</b><div class="mut">${esc(x.warehouse || '')}</div></td><td>${fmtKg(x.storeStock)}</td><td>${fmtKg(x.posStock)}</td><td><span class="badge ${x.diff === 0 ? 'g' : 'r'}">${x.diff > 0 ? '+' : ''}${fmtKg(x.diff)}</span></td></tr>`).join('');
+    pw.innerHTML = `<div class="card" style="margin-top:12px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b>Đối chiếu kho POS chính</b><span class="badge y">Chỉ quản lí (ADMIN)</span><span style="margin-left:auto" class="mut">Lệch: <b>${pc.mismatchCount}</b> / ${totalAll} mặt hàng</span></div>
+      <label style="display:flex;align-items:center;gap:6px;margin-top:8px;cursor:pointer"><input type="checkbox" id="pcOnlyDiff" ${pcOnlyDiff ? 'checked' : ''}> Chỉ hiện dòng có chênh lệch</label>
+      <div class="mut" style="margin:6px 0">Chênh lệch = Tồn kho cửa hàng (sổ kho) − Tồn kho POS chính (tổng tồn POS của sản phẩm trên toàn bộ dữ liệu POS). Dòng tô đỏ là mặt hàng đang lệch số giữa 2 kho; sản phẩm chỉ có ở 1 phía vẫn được liệt kê. Bảng này lọc theo ô Tìm kiếm ở trên.</div>
+      <table class="tbl"><tr><th>Mã SP</th><th>Sản phẩm</th><th>Tồn kho cửa hàng</th><th>Tồn kho POS chính</th><th>Chênh lệch</th></tr>${prows || '<tr><td colspan="5" class="mut">Không có mặt hàng nào khớp.</td></tr>'}</table>
+      ${capped ? `<div class="mut" style="margin-top:6px">Đang hiện ${shown.length} / ${rows.length} mặt hàng — gõ tìm kiếm để thu hẹp.</div>` : ''}</div>`;
+    const tg = $('#pcOnlyDiff');
+    if (tg) tg.onchange = () => { pcOnlyDiff = tg.checked; renderPc(); };
+  }
   async function load(reset) {
     if (reset) page = 1;
     const r = await api(`/api/inventory?warehouse=${encodeURIComponent($('#invWh').value)}&q=${encodeURIComponent($('#invQ').value)}&filter=${filter}&page=${page}`);
@@ -353,25 +378,15 @@ VIEWS.inventory = async () => {
       <td><span class="badge ${i.stock > 5 ? 'g' : i.stock > 0 ? 'y' : 'r'}">${fmtKg(i.stock)}</span></td></tr>`).join('');
     const html = `<table class="tbl"><tr><th>Mã SP</th><th>Sản phẩm</th><th>ĐVT</th><th>Tổng đã nhập</th><th>Tổng đã xuất</th><th>Tồn thực tế (sổ kho)</th></tr>${rows || '<tr><td colspan="6" class="mut">Chưa có sản phẩm nào trong kho. Sản phẩm chỉ xuất hiện tại đây sau khi đã có phiếu NHẬP ghi xuống Sheet (kho độc lập — không lấy danh mục/tồn của POS).</td></tr>'}</table>`;
     if (reset || page === 1) $('#invList').innerHTML = html; else $('#invList').querySelector('tbody').insertAdjacentHTML('beforeend', rows);
-    /* Đối chiếu kho POS chính — server CHỈ trả posCompare cho ADMIN; nhân viên không thấy khối này */
-    const pw = $('#invPosWrap');
-    if (pw) {
-      if (r.posCompare) {
-        const pc = r.posCompare;
-        const prows = pc.rows.map(x => `<tr class="${x.diff !== 0 ? 'diffrow' : ''}"><td>${esc(x.code) || '—'}</td><td><b>${esc(x.name)}</b><div class="mut">${esc(x.warehouse || '')}</div></td><td>${fmtKg(x.storeStock)}</td><td>${fmtKg(x.posStock)}</td><td><span class="badge ${x.diff === 0 ? 'g' : 'r'}">${x.diff > 0 ? '+' : ''}${fmtKg(x.diff)}</span></td></tr>`).join('');
-        pw.innerHTML = `<div class="card" style="margin-top:12px">
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b>Đối chiếu kho POS chính</b><span class="badge y">Chỉ quản lí (ADMIN)</span><span style="margin-left:auto" class="mut">Lệch: <b>${pc.mismatchCount}</b> / ${pc.rows.length} mặt hàng</span></div>
-          <div class="mut" style="margin:6px 0">Chênh lệch = Tồn kho cửa hàng (sổ kho) − Tồn kho POS chính. Dòng tô đỏ là mặt hàng đang lệch số giữa 2 kho; sản phẩm chỉ có ở 1 phía vẫn được liệt kê.</div>
-          <table class="tbl"><tr><th>Mã SP</th><th>Sản phẩm</th><th>Tồn kho cửa hàng</th><th>Tồn kho POS chính</th><th>Chênh lệch</th></tr>${prows || '<tr><td colspan="5" class="mut">Chưa có dữ liệu đối chiếu.</td></tr>'}</table></div>`;
-      } else pw.innerHTML = '';
-    }
+    /* Đối chiếu kho POS chính — giữ dữ liệu lần tải này rồi dựng qua renderPc() (công tắc lệch + giới hạn hiển thị) */
+    lastPc = r.posCompare || null;
+    renderPc();
     $('#invMore').classList.toggle('hidden', r.total <= page * 100);
   }
   let deb; $('#invQ').oninput = () => { clearTimeout(deb); deb = setTimeout(() => load(true), 160); };
   $('#invWh').onchange = () => load(true);
   $$('#view .chip').forEach(c => c.onclick = () => { $$('#view .chip').forEach(x => x.classList.remove('active')); c.classList.add('active'); filter = c.dataset.f; load(true); });
   $('#invMore').onclick = () => { page++; load(false); };
-  const rf = $('#invRefresh'); if (rf) rf.onclick = () => doSync(); // cùng MỘT cơ chế đồng bộ với nút "Đồng bộ" trên thanh đầu
   load(true);
 };
 
