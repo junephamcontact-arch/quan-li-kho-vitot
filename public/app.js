@@ -1,13 +1,13 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v35.271126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v36.271126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 /* ---------- Ngôn ngữ VI/EN ---------- */
 const I18N = {
-  vi: { dashboard: 'Dashboard', inventory: 'Tra cứu tồn kho', inbound: 'Nhập hàng', outbound: 'Xuất hàng', stocktake: 'Kiểm kho', processing: 'Chế biến / Sơ chế', recon: 'Đối soát đơn', calendar: 'Lịch', history: 'Lịch sử phiếu', settings: 'Cài đặt', logout: 'Đăng xuất', understood: 'Đã hiểu', activity: 'Hoạt động nhân viên', goods: 'Hàng hoá & Tồn kho', staffsum: 'Tổng hợp nhân viên' },
-  en: { dashboard: 'Dashboard', inventory: 'Inventory lookup', inbound: 'Goods receipt', outbound: 'Goods issue', stocktake: 'Stock check', processing: 'Processing', recon: 'Order audit', calendar: 'Calendar', history: 'Slip history', settings: 'Settings', logout: 'Log out', understood: 'OK, got it', activity: 'Staff activity', goods: 'Goods & stock', staffsum: 'Staff summary' }
+  vi: { dashboard: 'Dashboard', inventory: 'Tra cứu tồn kho', inbound: 'Nhập hàng', outbound: 'Xuất hàng', stocktake: 'Kiểm kho', processing: 'Chế biến / Sơ chế', recon: 'Đối soát đơn', calendar: 'Lịch', calendar_manage: 'Quản lí lịch (thêm / sửa / xoá sự kiện)', history: 'Lịch sử phiếu', settings: 'Cài đặt', logout: 'Đăng xuất', understood: 'Đã hiểu', activity: 'Hoạt động nhân viên', goods: 'Hàng hoá & Tồn kho', staffsum: 'Tổng hợp nhân viên' },
+  en: { dashboard: 'Dashboard', inventory: 'Inventory lookup', inbound: 'Goods receipt', outbound: 'Goods issue', stocktake: 'Stock check', processing: 'Processing', recon: 'Order audit', calendar: 'Calendar', calendar_manage: 'Manage calendar (add / edit / delete events)', history: 'Slip history', settings: 'Settings', logout: 'Log out', understood: 'OK, got it', activity: 'Staff activity', goods: 'Goods & stock', staffsum: 'Staff summary' }
 };
 let lang = localStorage.getItem('qk-lang') || 'vi';
 const t = k => (I18N[lang] && I18N[lang][k]) || I18N.vi[k] || k;
@@ -356,7 +356,8 @@ function slipDetailHTML(s) {
     ${s.type === 'in' ? `<div class="mut">Nhà cung cấp: ${esc(s.supplier || '—')}${s.expectedDate ? ` • Ngày về dự kiến: ${esc(s.expectedDate)}` : ''}${s.checker ? ` • Người kiểm: ${esc(s.checker)}` : ''}</div>` : ''}
     ${s.type === 'out' ? `<div class="mut">Phân loại: ${esc(s.exportType || '—')} • Nơi nhận: ${esc(s.recipient || '—')}</div>` : ''}
     ${s.note ? `<div class="mut">Ghi chú: ${esc(s.note)}</div>` : ''}
-    ${s.writeStatus === 'error' ? `<div style="color:var(--red);font-weight:600;margin-top:4px">Ghi lỗi Sheet: ${esc(s.writeError || '')}</div>` : ''}`;
+    ${s.writeStatus === 'error' ? `<div style="color:var(--red);font-weight:600;margin-top:4px">Ghi lỗi Sheet: ${esc(s.writeError || '')}</div>` : ''}
+    ${arrivalLineHTML(s)}`;
   let tbl = '';
   if (s.type === 'check') {
     tbl = `<table class="tbl"><tr><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>Đếm thực tế</th><th>Tồn hệ thống</th><th>Chênh lệch</th></tr>${(s.lines || []).map(l => `<tr><td>${esc(l.sku || '') || '—'}</td><td>${esc(l.sampleCode || '') || '—'}</td><td>${esc(l.name)}</td><td>${l.counted}</td><td>${l.systemStock ?? ''}</td><td>${l.variance !== undefined ? (l.variance > 0 ? '+' : '') + l.variance : ''}</td></tr>`).join('')}</table>`;
@@ -378,6 +379,7 @@ async function openSlipModal(code, type) {
     const r = await api('/api/slip?code=' + encodeURIComponent(code) + (type ? '&type=' + encodeURIComponent(type) : ''));
     $('#slipTitle').textContent = 'Chi tiết phiếu ' + r.slip.code;
     $('#slipBody').innerHTML = slipDetailHTML(r.slip);
+    wireArrivalButtons($('#slipBody'), () => openSlipModal(code, type));
   } catch (e) { $('#slipBody').innerHTML = `<p>${esc(e.message)}</p>`; }
 }
 function closeSlipModal() { const w = $('#slipWrap'); if (w) w.classList.remove('show'); }
@@ -388,6 +390,56 @@ function wireSlipLinks(root) {
 if ($('#slipClose')) {
   $('#slipClose').onclick = closeSlipModal;
   $('#slipWrap').addEventListener('click', e => { if (e.target.id === 'slipWrap') closeSlipModal(); });
+}
+
+/* ---------- Xác nhận nhận hàng (v36): dòng trạng thái trong chi tiết phiếu / Lịch sử ---------- */
+function arrivalLineHTML(s) {
+  const a = s.arrival; if (!a) return '';
+  if (a.confirmed) return `<div style="margin-top:6px"><span class="pill">✓ Đã nhận: ${esc(a.by || '')} · ${esc(a.at || '')}</span>
+    ${a.shortage ? `<div style="color:var(--red);font-weight:700;margin-top:3px">⚠️ Nhận THIẾU số lượng / hàng hỏng</div>` : ''}
+    ${a.note ? `<div class="mut">Ghi chú nhận hàng: ${esc(a.note)}</div>` : ''}
+    ${S.user && S.user.admin ? `<div style="margin-top:6px"><button class="btn danger" data-arr-unconfirm="${esc(s.code)}">Huỷ xác nhận</button></div>` : ''}</div>`;
+  return `<div style="margin-top:6px"><span class="pill warn">Chưa xác nhận nhận hàng</span>${a.overdueDays ? ` <span style="color:var(--red);font-weight:700">Quá hạn ${a.overdueDays} ngày</span>` : ''}
+    <button class="btn primary" style="margin-left:6px" data-arr-confirm="${esc(s.code)}">✓ Xác nhận đã nhận</button></div>`;
+}
+let arrCode = null, arrDone = null;
+function openArrConfirm(code, onDone) {
+  const wrap = $('#arrWrap'); if (!wrap) return;
+  arrCode = code; arrDone = onDone || null;
+  $('#arrTitle').textContent = 'Xác nhận đã nhận hàng — ' + code;
+  $('#arrBy').textContent = S.user ? S.user.name : '';
+  $('#arrNote').value = '';
+  $('#arrShortage').checked = false;
+  wrap.classList.add('show');
+  setTimeout(() => { const n = $('#arrNote'); if (n) n.focus(); }, 60);
+}
+function closeArrConfirm() { const w = $('#arrWrap'); if (w) w.classList.remove('show'); arrCode = null; arrDone = null; }
+if ($('#arrClose')) {
+  $('#arrClose').onclick = closeArrConfirm;
+  $('#arrCancel').onclick = closeArrConfirm;
+  $('#arrWrap').addEventListener('click', e => { if (e.target.id === 'arrWrap') closeArrConfirm(); });
+  $('#arrOk').onclick = async () => {
+    const code = arrCode, done = arrDone;
+    const btn = $('#arrOk'); btn.disabled = true;
+    try {
+      await post('/api/arrivals/confirm', { code, note: $('#arrNote').value, shortage: $('#arrShortage').checked });
+      closeArrConfirm();
+      toast('Đã xác nhận nhận hàng — phiếu ' + code);
+      if (done) done();
+    } catch (e) { alertErr('Không xác nhận được', e.message); }
+    btn.disabled = false;
+  };
+}
+function wireArrivalButtons(root, refresh) {
+  if (!root) return;
+  root.querySelectorAll('[data-arr-confirm]').forEach(b => b.onclick = e => { e.stopPropagation(); openArrConfirm(b.dataset.arrConfirm, refresh); });
+  root.querySelectorAll('[data-arr-unconfirm]').forEach(b => b.onclick = async e => {
+    e.stopPropagation();
+    const code = b.dataset.arrUnconfirm;
+    if (!await showConfirm('Huỷ xác nhận nhận hàng', `Huỷ xác nhận đã nhận của phiếu ${code}? Phiếu sẽ hiện lại trên Lịch ở trạng thái chưa nhận.`)) return;
+    try { await post('/api/arrivals/unconfirm', { code }); toast('Đã huỷ xác nhận — phiếu ' + code); if (refresh) refresh(); }
+    catch (err) { alertErr('Không huỷ xác nhận được', err.message); }
+  });
 }
 
 /* ---------- Dashboard (ADMIN): bộ lọc thời gian chung + hiệu suất chế biến + đối soát ---------- */
@@ -1392,6 +1444,7 @@ VIEWS.history = async () => {
         <span style="margin-left:auto">${wsPill(s)}</span><span class="chev">▾</span></div>
         <div class="slip-acc-body">
           <div class="mut">Người tạo: ${esc(s.creatorName)}${s.type === 'in' && s.expectedDate ? ` • Ngày về dự kiến: ${esc(s.expectedDate)}` : ''}${s.type === 'out' && s.exportType ? ` • Phân loại: ${esc(s.exportType)}` : ''}</div>
+          ${arrivalLineHTML(s)}
           <table class="tbl" style="margin-top:6px">${s.type === 'check' ? '<tr><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>Đếm thực tế</th><th>Tồn hệ thống</th><th>Chênh lệch</th></tr>' : s.type === 'process' ? '<tr><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>Chi tiết</th></tr>' : s.type === 'recon' ? '' : '<tr><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>Số lượng / Ghi chú</th></tr>'}${detail}</table>
           ${wsLine}
         </div>
@@ -1402,6 +1455,7 @@ VIEWS.history = async () => {
       h.parentElement.classList.toggle('open');
     });
     wireSlipLinks($('#hList')); // bấm mã phiếu → mở modal chi tiết phiếu gốc (v33)
+    wireArrivalButtons($('#hList'), load); // v36: xác nhận / huỷ xác nhận nhận hàng ngay trong Lịch sử
     $$('#hList [data-retry]').forEach(b => b.onclick = async () => {
       b.disabled = true;
       try { const r = await post(`/api/slips/${encodeURIComponent(b.dataset.retry)}/retry-write`); await alertOk('Đã ghi lại thành công', `Phiếu ${r.slip.code} đã ghi xuống Sheet lúc ${r.slip.writtenAt}.`); load(); }
@@ -1460,9 +1514,12 @@ VIEWS.calendar = async () => {
     const tk = bkkKey(0);
     $('#calGrid').innerHTML = cells.map(d => {
       const k = key(d);
-      const na = (arrByDay[k] || []).length, ne = (evByDay[k] || []).length;
+      const dayArrs = arrByDay[k] || [];
+      const na = dayArrs.length, ne = (evByDay[k] || []).length;
+      const maxOver = dayArrs.reduce((a, x) => Math.max(a, x.overdueDays || 0), 0); // v36: quá hạn lâu nhất trong ngày
       const dots = [];
       if (na) dots.push(`<span class="cal-dot arr"></span><span class="cal-cnt">${na} hàng về</span>`);
+      if (maxOver) dots.push(`<span class="cal-dot over"></span><span class="cal-cnt over">Quá hạn ${maxOver} ngày</span>`);
       if (ne) dots.push(`<span class="cal-dot evt"></span><span class="cal-cnt">${ne} sự kiện</span>`);
       return `<button class="cal-day ${d.getMonth() !== S.calM ? 'dim' : ''} ${k === tk ? 'today' : ''} ${k === S.calSel ? 'sel' : ''}" data-day="${k}" ${d.getMonth() !== S.calM ? 'disabled' : ''}>
         <span class="dn">${d.getDate()}</span><div class="cal-dots">${dots.join('')}</div></button>`;
@@ -1478,9 +1535,9 @@ VIEWS.calendar = async () => {
     const evs = S.calData.events.filter(e => e.date === k);
     let html = '';
     for (const a of arrs) {
-      html += `<div class="cal-item"><span class="cal-tag arr">Hàng về</span> <b>${esc(a.code)}</b> <span class="mut">${esc(a.supplier || '')} • ${esc(a.warehouse || '')}</span>
+      html += `<div class="cal-item"><span class="cal-tag arr">Hàng về</span>${a.overdueDays ? ` <span class="cal-tag over">Quá hạn ${a.overdueDays} ngày</span>` : ''} <b>${esc(a.code)}</b> <span class="mut">${esc(a.supplier || '')} • ${esc(a.warehouse || '')}</span>
         <div class="mut" style="margin-top:3px">${a.lines.map(l => `${esc(l.name)}: ${l.qty} ${esc(l.unit || '')}`).join(' • ') || '—'}</div>
-        <button class="btn" style="margin-top:6px" data-arr="${esc(a.slipId)}">Xem chi tiết phiếu</button></div>`;
+        <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap"><button class="btn" data-arr="${esc(a.slipId)}">Xem chi tiết phiếu</button><button class="btn primary" data-arr-confirm="${esc(a.code)}">✓ Xác nhận đã nhận</button></div></div>`;
     }
     for (const e of evs) {
       html += `<div class="cal-item"><span class="cal-tag evt">Sự kiện</span> <b>${esc(e.title)}</b>${e.time ? ` <span class="mut">${esc(e.time)}</span>` : ''}
@@ -1493,8 +1550,9 @@ VIEWS.calendar = async () => {
        form xuống, bấm lại (hoặc nút Đóng/Huỷ sửa trong form) thì thu gọn. Không dùng hộp thoại modal. */
     const evF = evEdit;
     const formOpen = !!(evF || evOpen);
-    html += `<button class="btn primary" id="calAddEv" style="margin-top:4px">+ Thêm sự kiện ${formOpen ? '▴' : '▾'}</button>`;
-    if (formOpen) html += `<div class="cal-ev-form" id="calEvForm">
+    const canManage = !!(S.calData && S.calData.canManage); // v36: chỉ người có quyền "Quản lí lịch" mới thấy nút thêm + form sự kiện
+    if (canManage) html += `<button class="btn primary" id="calAddEv" style="margin-top:4px">+ Thêm sự kiện ${formOpen ? '▴' : '▾'}</button>`;
+    if (canManage && formOpen) html += `<div class="cal-ev-form" id="calEvForm">
       <b>${evF ? 'Sửa sự kiện' : 'Thêm sự kiện'}</b>
       <div class="field" style="margin-top:8px"><label class="f">Tiêu đề *</label><input class="in" id="calEvTitle" placeholder="VD: Nhận hàng cua từ NCC A" value="${evF ? esc(evF.title) : ''}"></div>
       <div class="grid2">
@@ -1513,6 +1571,7 @@ VIEWS.calendar = async () => {
       if (!a) return;
       alertInfo('Chi tiết phiếu nhập ' + a.code, `Nhà cung cấp: ${a.supplier || '—'}\nKho: ${a.warehouse || '—'}\nNgười tạo: ${a.creatorName || '—'}\nNgày về dự kiến: ${a.date}\n\nMặt hàng:\n${a.lines.map(l => `• ${l.name}: ${l.qty} ${l.unit || ''}`).join('\n') || '—'}\n\n(Chỉ xem — muốn sửa hãy vào Lịch sử phiếu / màn Nhập hàng.)`);
     });
+    $$('#calDayBody [data-arr-confirm]').forEach(b => b.onclick = () => openArrConfirm(b.dataset.arrConfirm, load)); // v36
     $$('#calDayBody [data-ev-del]').forEach(b => b.onclick = async () => {
       if (!await showConfirm('Xoá sự kiện', 'Bạn chắc chắn muốn xoá sự kiện này?')) return;
       try { await api('/api/calendar-events/' + encodeURIComponent(b.dataset.evDel), { method: 'DELETE' }); toast('Đã xoá sự kiện'); load(); }
@@ -1524,7 +1583,8 @@ VIEWS.calendar = async () => {
       renderDay();
       const t = $('#calEvTitle'); if (t) { t.focus(); t.scrollIntoView({ block: 'center' }); }
     });
-    $('#calAddEv').onclick = () => {
+    const calAddEvBtn = $('#calAddEv');
+    if (calAddEvBtn) calAddEvBtn.onclick = () => {
       if (evEdit) { evEdit = null; evOpen = false; renderDay(); return; } // đang sửa mà bấm nút → huỷ sửa + thu gọn
       evOpen = !evOpen;
       renderDay();
@@ -1703,7 +1763,7 @@ VIEWS.settings = async () => {
   function loadRoles(pre) {
     let editingRoleId = null;
     const render = roles => {
-      const mods = ['dashboard','inventory','inbound','outbound','stocktake','processing','recon','calendar','history'];
+      const mods = ['dashboard','inventory','inbound','outbound','stocktake','processing','recon','calendar','calendar_manage','history'];
       if (!roles.roles.some(r => r.id === rolePickId)) rolePickId = (roles.roles[0] || {}).id || null;
       const pick = $('#sRolePick');
       pick.innerHTML = roles.roles.map(r => `<option value="${r.id}" ${r.id === rolePickId ? 'selected' : ''}>${esc(r.name)}${r.system ? ' (hệ thống)' : ''}</option>`).join('');
@@ -1731,7 +1791,7 @@ VIEWS.settings = async () => {
         try { await api('/api/roles/' + rid, { method: 'PUT', body: JSON.stringify({ perms: role.perms }) }); toast('Đã cập nhật phân quyền'); } catch (e) { alertErr('Lỗi', e.message); }
       });
       $$('#sRoles [data-del-role]').forEach(b => b.onclick = async () => { if (!await showConfirm('Xoá chức vụ', 'Xoá chức vụ này?')) return; try { await api('/api/roles/' + b.dataset.delRole, { method: 'DELETE' }); rolePickId = null; loadStaff(); } catch (e) { alertErr('Không xoá được', e.message); } });
-      const mods2 = ['dashboard','inventory','inbound','outbound','stocktake','processing','recon','calendar','history'];
+      const mods2 = ['dashboard','inventory','inbound','outbound','stocktake','processing','recon','calendar','calendar_manage','history'];
       $('#sNewRolePerms').innerHTML = mods2.map(m => `<div class="perm-row"><span class="perm-name">${I18N.vi[m]}</span><label class="switch"><input type="checkbox" data-nrp="${m}"><span class="track"></span></label></div>`).join('');
     };
     if (pre) render(pre); else api('/api/roles').then(render);

@@ -332,6 +332,18 @@ html[data-theme="dark"] .disc-badge.resolved{background:#173626;color:#5fd68a}
 .slip-x{background:rgba(255,255,255,.14);color:#fff;width:28px;height:28px;border-radius:9px;font-size:13px;flex:0 0 28px}
 .slip-body{padding:16px 18px 18px;text-align:left;max-height:72vh;overflow:auto}
 .slip-body .mut{line-height:1.55}
+/* Modal xác nhận nhận hàng (v36): cùng khung VITOT với modal chi tiết phiếu */
+#arrWrap{position:fixed;inset:0;z-index:110;display:flex;align-items:center;justify-content:center;padding:18px;background:rgba(8,18,12,.45);backdrop-filter:blur(3px);opacity:0;pointer-events:none;transition:opacity .22s}
+#arrWrap.show{opacity:1;pointer-events:auto}
+#arrWrap .modal{transform:translateY(14px) scale(.97);transition:transform .25s cubic-bezier(.32,.72,.24,1)}
+#arrWrap.show .modal{transform:none}
+#arrWrap .modal-head{justify-content:flex-start;padding-left:16px}
+#arrWrap .modal-head #arrTitle{flex:1;text-align:center}
+/* Hàng về QUÁ HẠN trên Lịch (v36) */
+.cal-dot.over{background:#dc2626}
+.cal-cnt.over{color:#dc2626}
+.cal-tag.over{background:#fde8e8;color:#b91c1c}
+html[data-theme="dark"] .cal-tag.over{background:#3d1d1f;color:#ff8a8e}
 
 /* ---------- Toast ---------- */
 #toasts{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:120;display:flex;flex-direction:column;gap:8px;align-items:center}

@@ -17,7 +17,7 @@
   <div class="card login-card">
     <img class="logo-img" src="vitot-logo.png" alt="Logo Vitot" style="width:64px;height:64px;border-radius:20px;margin:0 auto 12px">
     <h1 style="margin:0;font-size:21px">Quản lí kho Vitot</h1>
-    <div class="mut" style="margin-top:4px">Hệ thống nội bộ v35.271126</div>
+    <div class="mut" style="margin-top:4px">Hệ thống nội bộ v36.271126</div>
     <p class="mut" id="loginHint" style="margin:16px 0 0">Nhập mã PIN 4 số để đăng nhập</p>
     <div class="pin-dots" id="pinDots"><span></span><span></span><span></span><span></span></div>
     <div class="pinpad" id="pinPad"></div>
@@ -30,7 +30,7 @@
   <aside id="sidebar">
     <div class="brand">
       <img class="logo-img" src="vitot-logo.png" alt="Logo Vitot">
-      <div><h1>Quản lí kho Vitot</h1><div class="sub">Hệ thống nội bộ v35.271126</div></div>
+      <div><h1>Quản lí kho Vitot</h1><div class="sub">Hệ thống nội bộ v36.271126</div></div>
     </div>
     <nav id="nav"></nav>
     <div class="side-foot">
@@ -85,6 +85,21 @@
   <div class="modal wide">
     <div class="modal-head"><span class="mh-dot"></span><span id="slipTitle">Chi tiết phiếu</span><button class="slip-x" id="slipClose" title="Đóng">✕</button></div>
     <div class="slip-body" id="slipBody"></div>
+  </div>
+</div>
+<!-- Modal xác nhận nhận hàng (v36) -->
+<div id="arrWrap">
+  <div class="modal">
+    <div class="modal-head"><span class="mh-dot"></span><span id="arrTitle">Xác nhận đã nhận hàng</span><button class="slip-x" id="arrClose" title="Đóng">✕</button></div>
+    <div class="slip-body">
+      <div class="field"><label class="f">Người nhận</label><div class="locked"><span class="lk">🔒</span><span id="arrBy"></span></div></div>
+      <div class="field"><label class="f">Ghi chú (tuỳ chọn)</label><textarea class="in" id="arrNote" rows="2" placeholder="VD: Nhận đủ, hàng nguyên vẹn"></textarea></div>
+      <label style="display:flex;gap:8px;align-items:flex-start;margin:12px 0 4px;cursor:pointer"><input type="checkbox" id="arrShortage" style="width:18px;height:18px;flex:0 0 18px;margin-top:1px"><span><b>Nhận thiếu số lượng / hàng hỏng</b><br><span class="mut">Đánh dấu này sẽ báo cho ADMIN trong hộp cảnh báo.</span></span></label>
+      <div style="display:flex;gap:8px;margin-top:14px">
+        <button class="btn" id="arrCancel" style="flex:1">Huỷ</button>
+        <button class="btn primary" id="arrOk" style="flex:1">✓ Xác nhận đã nhận</button>
+      </div>
+    </div>
   </div>
 </div>
 <div id="toasts"></div>
