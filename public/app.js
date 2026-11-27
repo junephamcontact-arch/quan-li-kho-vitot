@@ -1,5 +1,5 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v38.271126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v39.271126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -716,6 +716,20 @@ ADMIN_VIEWS.recon = async () => {
         </div>
       </div>`;
       }).join('') || '<p class="mut">Không có ngày nào trong kỳ.</p>';
+      /* v39: hàng chờ "Dòng bán chưa trừ được" — dòng hàng của đơn đã quét mà app chưa trừ được
+         vào kho khi chốt đối soát (không khớp sản phẩm kho / số lượng bất thường / lỗi tạo phiếu). */
+      if (r.review && r.review.length) {
+        box.insertAdjacentHTML('beforeend', `<div class="card" style="margin-bottom:12px">
+          <b>⚠️ Dòng bán chưa trừ được (${r.review.length})</b>
+          <div class="mut" style="margin:4px 0 8px">Dòng hàng trong các đơn đã chốt đối soát nhưng app CHƯA trừ được vào kho. Kiểm tra và xử lí tay (tạo phiếu xuất / sửa dữ liệu gốc), xong thì bấm "Đã xử lí" để đóng dòng.</div>
+          ${r.review.map(x => `<div class="disc-row"><span class="pill warn">${esc(x.orderCode)}</span><span><b>${esc(x.lineText)}</b><div class="mut">${esc(x.reason)} • ${esc(x.at || '')} • phiên ${esc(x.sessionCode || '')}${x.by ? ` • ${esc(x.by)}` : ''}</div></span><button class="btn" style="margin-left:auto;flex:0 0 auto" data-drev="${esc(x.id)}">Đã xử lí</button></div>`).join('')}
+        </div>`);
+        box.querySelectorAll('[data-drev]').forEach(b => b.onclick = async () => {
+          b.disabled = true;
+          try { await post('/api/deduct-review-dismiss', { id: b.dataset.drev }); toast('Đã đóng dòng chờ xử lí'); load(); }
+          catch (e) { alertErr('Không đóng được dòng', e.message); b.disabled = false; }
+        });
+      }
       box.querySelectorAll('[data-rc-toggle]').forEach(h => h.onclick = () => {
         const body = box.querySelector(`[data-rc-body="${h.dataset.rcToggle}"]`);
         if (!body) return;
@@ -822,15 +836,16 @@ VIEWS.inventory = async () => {
     // warehouseSummary với bootstrap) → chip, dòng tóm tắt và bảng Tra cứu không bao giờ lệch nhau.
     if (r.warehouseStock && S.boot) { S.boot.warehouseStock = r.warehouseStock; setInvBadge(); }
     $('#cAll').textContent = r.counts.all; $('#cAv').textContent = r.counts.available; $('#cOut').textContent = r.counts.out;
-    $('#invMeta').textContent = `Sản phẩm của kho — TỔNG HỢP theo mã từ mọi phiếu Nhập đã ghi (1 mã nhập nhiều lần chỉ hiện 1 dòng). Tồn thực tế = Tổng đã nhập − Tổng đã xuất: "Tổng đã nhập" gồm phiếu Nhập + thành phẩm chế biến nhập lại kho; "Tổng đã xuất" gồm xuất kho + nguyên liệu đưa vào chế biến. Phiếu Kiểm kho chỉ để đối chiếu, KHÔNG thay đổi số tồn. Cập nhật: ${r.syncedAt || '—'}`;
+    $('#invMeta').textContent = `Sản phẩm của kho — TỔNG HỢP theo mã từ mọi phiếu Nhập đã ghi (1 mã nhập nhiều lần chỉ hiện 1 dòng). Tồn sổ = Tổng đã nhập − Tổng đã xuất: "Tổng đã nhập" gồm phiếu Nhập + thành phẩm chế biến nhập lại kho; "Tổng đã xuất" gồm xuất kho + nguyên liệu đưa vào chế biến. Phiếu Kiểm kho chỉ để đối chiếu, KHÔNG thay đổi số tồn. Tồn thực tế = Tồn sổ − số đã bán hôm nay (đơn POS đã giao) chưa được trừ khi chốt đối soát. Cập nhật: ${r.syncedAt || '—'}`;
     if (r.summary) $('#invSummary').innerHTML = `Tổng tồn thực tế trong kho: <b>${fmtKg(r.summary.totalQty)}</b> &nbsp;•&nbsp; <b>${r.summary.productCount}</b> mặt hàng đang có tồn <span class="mut">(theo sổ kho${$('#invWh').value ? ' của kho đang chọn' : ''})</span>`;
     const sttOff = (page - 1) * 100; // STT chạy liên tục theo đúng thứ tự đang hiển thị (kể cả khi bấm "Xem thêm")
     const rows = r.items.map((i, idx) => `<tr><td>${sttOff + idx + 1}</td><td>${esc(i.sku || '') || '—'}</td><td>${esc(i.sampleCode || i.code || '') || '—'}</td><td><b>${esc(i.name)}</b><div class="mut">${esc(i.warehouse)}</div></td>
       <td>${esc(i.unit) || '—'}</td>
       <td>${fmtKg(i.totalIn)}</td>
       <td>${fmtKg(i.totalOut)}</td>
-      <td><span class="badge ${i.stock > 5 ? 'g' : i.stock > 0 ? 'y' : 'r'}">${fmtKg(i.stock)}</span></td></tr>`).join('');
-    const html = `<table class="tbl"><tr><th>STT</th><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>ĐVT</th><th>Tổng đã nhập</th><th>Tổng đã xuất</th><th>Tồn thực tế (sổ kho)</th></tr>${rows || '<tr><td colspan="8" class="mut">Chưa có sản phẩm nào trong kho. Sản phẩm chỉ xuất hiện tại đây sau khi đã có phiếu NHẬP ghi xuống Sheet (kho độc lập — không lấy danh mục/tồn của POS).</td></tr>'}</table>`;
+      <td><span class="badge ${i.stock > 5 ? 'g' : i.stock > 0 ? 'y' : 'r'}">${fmtKg(i.stock)}</span></td>
+      <td><span class="badge ${(i.actualStock ?? i.stock) > 5 ? 'g' : (i.actualStock ?? i.stock) > 0 ? 'y' : 'r'}">${fmtKg(i.actualStock ?? i.stock)}</span>${(i.soldTodayUndeducted || 0) > 0 ? `<div class="mut">đã bán hôm nay chưa trừ: ${fmtKg(i.soldTodayUndeducted)}</div>` : ''}</td></tr>`).join('');
+    const html = `<table class="tbl"><tr><th>STT</th><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>ĐVT</th><th>Tổng đã nhập</th><th>Tổng đã xuất</th><th>Tồn sổ</th><th>Tồn thực tế</th></tr>${rows || '<tr><td colspan="9" class="mut">Chưa có sản phẩm nào trong kho. Sản phẩm chỉ xuất hiện tại đây sau khi đã có phiếu NHẬP ghi xuống Sheet (kho độc lập — không lấy danh mục/tồn của POS).</td></tr>'}</table>`;
     if (reset || page === 1) $('#invList').innerHTML = html; else $('#invList').querySelector('tbody').insertAdjacentHTML('beforeend', rows);
     /* Đối chiếu kho POS chính — giữ dữ liệu lần tải này rồi dựng qua renderPc() (công tắc lệch + giới hạn hiển thị) */
     lastPc = r.posCompare || null;
@@ -1247,7 +1262,11 @@ function beepOk() {
 VIEWS.recon = async () => {
   const v = $('#view'); v.className = 'view';
   const L = S.boot.lists;
-  v.innerHTML = `<div style="display:grid;grid-template-columns:1.4fr 1fr;gap:12px" id="reconGrid">
+  v.innerHTML = `<div class="card" style="padding:12px;margin-bottom:12px">
+      <b>🛒 Bán hôm nay</b> <span class="mut">— hàng đã bán theo đơn POS hôm nay (tự trừ vào kho khi chốt phiên đối soát)</span>
+      <div id="rSalesBody" style="margin-top:8px">Đang tải…</div>
+    </div>
+  <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:12px" id="reconGrid">
     <div class="card" style="padding:12px">
       <label class="f" style="margin-bottom:5px">Quét / nhập mã đơn hàng</label>
       <div style="display:flex;gap:7px">
@@ -1382,13 +1401,29 @@ VIEWS.recon = async () => {
     stopCam();
     try {
       const r = await post('/api/slips', { type: 'recon', warehouse: $('#rWh').value, lines: S.reconCodes.map(code => ({ code })) });
-      if (r.slip.writeStatus === 'written') await alertOk('Đã gửi đối soát', `Phiên ${r.slip.code} gồm ${S.reconCodes.length} đơn đã ghi xuống Sheet.\nNgười thực hiện: ${r.slip.creatorName} • ${r.slip.createdAt}`);
-      else await alertWarn('Đã lưu phiên, chưa ghi được Sheet', `Phiên ${r.slip.code} đã lưu trong app nhưng ghi Sheet lỗi: ${r.slip.writeError}\nVào Lịch sử phiếu bấm "Ghi lại" khi đã xử lí xong lỗi.`);
+      // v39: tóm tắt TỰ TRỪ KHO của phiên — server trừ theo dòng hàng POS của từng đơn đã quét
+      const d = r.deduction;
+      const dTxt = d ? (d.error
+        ? `\nTrừ kho tự động: KHÔNG chạy được (${d.error}) — báo quản lí kiểm tra.`
+        : `\nTrừ kho tự động: đã trừ ${d.deducted} đơn${d.slipCode ? ` (phiếu xuất ${d.slipCode})` : ''} • ${d.alreadyDeducted} đơn đã trừ từ phiên trước • ${d.notDelivered} đơn chưa giao • ${d.noData} đơn chưa có dữ liệu POS • ${d.reviewLines} dòng chưa trừ được (quản lí xử lí).`) : '';
+      if (r.slip.writeStatus === 'written') await alertOk('Đã gửi đối soát', `Phiên ${r.slip.code} gồm ${S.reconCodes.length} đơn đã ghi xuống Sheet.\nNgười thực hiện: ${r.slip.creatorName} • ${r.slip.createdAt}${dTxt}`);
+      else await alertWarn('Đã lưu phiên, chưa ghi được Sheet', `Phiên ${r.slip.code} đã lưu trong app nhưng ghi Sheet lỗi: ${r.slip.writeError}\nVào Lịch sử phiếu bấm "Ghi lại" khi đã xử lí xong lỗi.${dTxt}`);
       go('recon');
     } catch (e) { alertErr('Không gửi được đối soát', e.message); }
   };
   const h = await api('/api/history?type=recon').catch(() => ({ slips: [] }));
   $('#rSessions').innerHTML = h.slips.length ? h.slips.map(s => `<p style="margin:8px 0"><span class="pill">${esc(s.code)}</span> ${s.lines.length} đơn • ${esc(s.warehouse)} • ${esc(s.creatorName)} • ${esc(s.createdAt)} ${wsPill(s)}</p>`).join('') : '<p class="mut">Chưa có phiên nào.</p>';
+  /* v39: thẻ "Bán hôm nay" — số liệu từ /api/sales-today (đơn POS hôm nay đã khớp sản phẩm kho) */
+  try {
+    const st = await api('/api/sales-today');
+    const sb = $('#rSalesBody');
+    if (sb && S.view === 'recon') {
+      sb.innerHTML = (st.items.length
+        ? `<div style="overflow-x:auto"><table class="tbl"><tr><th>Sản phẩm</th><th>Đã bán (đã giao)</th><th>Chờ giao</th></tr>${st.items.map(i => `<tr><td><b>${esc(i.name)}</b>${i.unit ? `<div class="mut">${esc(i.unit)}</div>` : ''}</td><td>${fmtKg(i.qtyOut)}</td><td>${fmtKg(i.qtyPending)}</td></tr>`).join('')}</table></div>`
+        : '<p class="mut" style="margin:4px 0">Hôm nay chưa ghi nhận đơn bán nào khớp với sản phẩm kho.</p>')
+        + (st.unmatchedCount ? `<div class="mut" style="margin-top:6px">${st.unmatchedCount} dòng hàng chưa khớp được sản phẩm kho — quản lí sẽ xử lí khi đối soát</div>` : '');
+    }
+  } catch (e) { const sb = $('#rSalesBody'); if (sb) sb.innerHTML = '<p class="mut" style="margin:4px 0">Chưa tải được số bán hôm nay.</p>'; }
   refreshList();
 };
 
