@@ -1,5 +1,5 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v37.271126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v38.271126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -871,7 +871,7 @@ VIEWS.outbound = async () => {
       <div class="irow"><label>Kho xuất hàng: <span class="req">*</span></label><select class="in" id="outWh">${selOptions(L.warehouses, defWh())}</select></div>
       <div class="irow"><label>Phân loại xuất kho: <span class="req">*</span></label><select class="in" id="outKind">${cats.map(c => `<option value="${esc(c)}">${catIcon(c)} ${esc(c)}</option>`).join('')}</select></div>
       <div class="irow"><label>Nơi nhận / Khách nhận / Khu vực tủ:</label><input class="in" id="outRecv" placeholder="VD: 3 tủ Cửa hàng, Khách sỉ A, Hủy bể..." autocomplete="off"></div>
-      <div class="irow"><label>Thời gian xuất (Khóa tự động):</label><input class="in" id="outCreated" disabled value="${fmtAutoTime(new Date())}"></div>
+      <div class="irow"><label>Thời gian xuất (Khóa tự động):</label><div class="locked-in"><span class="lk">🔒</span><input class="in" id="outCreated" disabled value="${fmtAutoTime(new Date())}"></div></div>
       <div class="irow"><label>Nhân viên xuất kho: <span class="req">*</span></label><div class="locked"><span class="lk">🔒</span><span>${esc(S.user.name)}</span></div></div>
       <div class="rules-box-pink"><b>Quy trình Vitot Food:</b><br>
       • Phiếu xuất khi lưu sẽ <b>ghi thẳng xuống Google Sheet</b> (tab XUẤT_HÀNG) — không cần quản lí xác nhận, hãy kiểm tra kỹ số lượng trước khi lưu.<br>
@@ -947,7 +947,7 @@ VIEWS.inbound = async () => {
       <div class="irow"><label>Nhà cung cấp: <span class="req">*</span></label>
         <span><input class="in" id="inSup" list="inSupList" placeholder="Chọn hoặc nhập tên NCC..." autocomplete="off">
         <datalist id="inSupList">${L.suppliers.map(s => `<option value="${esc(s)}"></option>`).join('')}</datalist></span></div>
-      <div class="irow"><label>Ngày tạo phiếu: <span class="req">*</span></label><input class="in" id="inCreated" disabled value="${fmtAutoTime(new Date())}"></div>
+      <div class="irow"><label>Ngày tạo phiếu: <span class="req">*</span></label><div class="locked-in"><span class="lk">🔒</span><input class="in" id="inCreated" disabled value="${fmtAutoTime(new Date())}"></div></div>
       ${canPlan
         ? `<div class="irow"><label>Ngày về dự kiến:</label><input class="in" type="date" id="inExpected"></div>`
         : `<div class="irow"><span class="mut">Ngày về dự kiến: chỉ quản lí mới tạo phiếu hàng đặt trước.</span></div>`}
@@ -1038,7 +1038,7 @@ VIEWS.stocktake = async () => {
       <div class="field" style="margin-top:10px"><label class="f">Lọc theo danh mục</label><select class="in" id="kCat"><option value="">Tất cả danh mục</option>${selOptions(cats)}</select></div>
       <div style="overflow-x:auto">
         <table class="tbl in-tbl">
-          <thead><tr><th style="width:42px">STT</th><th>Sản phẩm</th><th>SL kiểm thực tế <span class="req">*</span></th><th style="width:50px">Xóa</th></tr></thead>
+          <thead><tr><th style="width:42px">STT</th><th>Mã SP</th><th>Mã mẫu</th><th>Tên sản phẩm</th><th>SL kiểm thực tế <span class="req">*</span></th><th style="width:50px">Xóa</th></tr></thead>
           <tbody id="kRows"></tbody>
         </table>
       </div>
@@ -1047,7 +1047,7 @@ VIEWS.stocktake = async () => {
     <div class="card">
       <div class="info-head"><b>Thông tin phiếu kiểm kho</b><span class="badge-check">KIỂM KHO</span></div>
       <div class="irow"><label>Kho kiểm hàng: <span class="req">*</span></label><select class="in" id="kWh">${selOptions(L.warehouses, defWh())}</select></div>
-      <div class="irow"><label>Thời gian kiểm (Khóa tự động):</label><input class="in" id="kCreated" disabled value="${fmtAutoTime(new Date())}"></div>
+      <div class="irow"><label>Thời gian kiểm (Khóa tự động):</label><div class="locked-in"><span class="lk">🔒</span><input class="in" id="kCreated" disabled value="${fmtAutoTime(new Date())}"></div></div>
       <div class="irow"><label>Người kiểm: <span class="req">*</span></label><div class="locked"><span class="lk">🔒</span><span>${esc(S.user.name)}</span></div></div>
       <div class="rules-box-purple"><b>Quy định kiểm kho Vitot Food:</b><br>
       • Đây là <b>kiểm mù</b>: chỉ nhập số lượng kiểm thực tế tại kho — app không hiển thị tồn hệ thống khi kiểm.<br>
@@ -1061,11 +1061,13 @@ VIEWS.stocktake = async () => {
   function renderRows() {
     $('#kCnt').textContent = S.slipLines.length + ' mã';
     if (!S.slipLines.length) {
-      rowsBox.innerHTML = `<tr><td colspan="4"><div class="in-empty"><span class="box">🧮</span>Chưa có sản phẩm nào trong phiếu kiểm<div class="sub">Gõ tên sản phẩm vào ô tìm kiếm phía trên để thêm vào danh sách kiểm</div></div></td></tr>`;
+      rowsBox.innerHTML = `<tr><td colspan="6"><div class="in-empty"><span class="box">🧮</span>Chưa có sản phẩm nào trong phiếu kiểm<div class="sub">Gõ tên sản phẩm vào ô tìm kiếm phía trên để thêm vào danh sách kiểm</div></div></td></tr>`;
     } else {
       rowsBox.innerHTML = S.slipLines.map((l, i) => `<tr>
         <td>${i + 1}</td>
-        <td><b>${esc(l.name)}</b>${l.variant ? ' — ' + esc(l.variant) : ''}<div class="mut">${esc(l.sampleCode || '')}</div></td>
+        <td>${esc(l.sku || '') || '—'}</td>
+        <td>${esc(l.sampleDisp || l.sampleCode || '') || '—'}</td>
+        <td><b>${esc(l.name)}</b>${l.variant ? ' — ' + esc(l.variant) : ''}</td>
         <td><input class="in" type="number" min="0" step="0.01" value="${l.counted ?? ''}" data-q="${i}" placeholder="Đếm thực tế"></td>
         <td><button class="icon-btn" data-d="${i}" title="Xoá">✕</button></td></tr>`).join('');
       rowsBox.querySelectorAll('[data-q]').forEach(inp => inp.oninput = () => { S.slipLines[+inp.dataset.q].counted = inp.value; });
@@ -1075,7 +1077,7 @@ VIEWS.stocktake = async () => {
   const kOpts = { items: allBlind, itemHtml: whBlindHtml, warehouse: () => $('#kWh').value, emptyMsg: 'Không thấy sản phẩm trong kho đang chọn. Chỉ kiểm được sản phẩm kho ĐÃ TỪNG NHẬP — mã chưa nhập lần nào sẽ không có trong danh sách kiểm.' };
   productPicker($('#kPick'), $('#kPickList'), kOpts, p => {
     if (S.slipLines.some(l => l.sampleCode === p.code && l.name === p.name)) return toast('Sản phẩm đã có trong danh sách kiểm.');
-    S.slipLines.push({ key: p.posKey || '', name: p.name, variant: '', sampleCode: p.code, counted: '' }); renderRows();
+    S.slipLines.push({ key: p.posKey || '', name: p.name, variant: '', sampleCode: p.code, sku: p.sku || '', sampleDisp: p.sampleCode || p.code || '', counted: '' }); renderRows();
   });
   $('#kCat').onchange = () => { const c = $('#kCat').value; kOpts.items = c ? allBlind.filter(p => p.category === c) : allBlind; };
   renderRows();
@@ -1151,7 +1153,7 @@ VIEWS.processing = async () => {
       <div class="card">
         <div class="info-head"><b>Thông tin phiếu chế biến</b></div>
         <div class="irow"><label>Kho / Khu vực chế biến <span class="req">*</span></label><select class="in" id="cbWh">${selOptions(L.warehouses, defWh())}</select></div>
-        <div class="irow"><label>Thời gian thực hiện</label><input class="in" id="cbCreated" disabled value="${fmtAutoTime(new Date())}"></div>
+        <div class="irow"><label>Thời gian thực hiện</label><div class="locked-in"><span class="lk">🔒</span><input class="in" id="cbCreated" disabled value="${fmtAutoTime(new Date())}"></div></div>
         <div class="irow"><label>Nhân viên thực hiện <span class="req">*</span></label><div class="locked"><span class="lk">🔒</span><span>${esc(S.user.name)}</span></div></div>
         <div class="field"><label class="f">Ghi chú thêm (Lô hàng / NCC)</label><textarea class="in" id="cbNote" rows="2"></textarea></div>
         <button class="btn primary submit-lg" id="cbSubmit">Lưu phiếu chế biến</button>
@@ -1684,7 +1686,7 @@ VIEWS.settings = async () => {
       <p class="mut">Khi bật, app chỉ mở được từ các IP công cộng trong danh sách dưới đây (ví dụ IP mạng tại công ty). Người ở ngoài mạng công ty sẽ thấy trang thông báo và không đăng nhập được. Mặc định: <b>tắt</b>.</p>
       <label style="display:flex;gap:8px;align-items:center;font-weight:600;margin-bottom:12px"><input type="checkbox" id="sIpOn"> Chỉ cho phép dùng app trong mạng công ty</label>
       <div class="field"><label class="f">IP hiện tại của bạn (máy chủ nhìn thấy)</label>
-        <div style="display:flex;gap:8px"><input class="in" id="sIpMine" readonly placeholder="Đang lấy…"><button class="btn" id="sIpUseMine" type="button">Dùng IP hiện tại của tôi</button></div></div>
+        <div style="display:flex;gap:8px"><div class="locked-in" style="flex:1"><span class="lk">🔒</span><input class="in" id="sIpMine" readonly placeholder="Đang lấy…"></div><button class="btn" id="sIpUseMine" type="button">Dùng IP hiện tại của tôi</button></div></div>
       <label class="f">Danh sách IP / dải CIDR được phép</label>
       <div id="sIpList"></div>
       <div style="display:flex;gap:8px;margin-top:8px"><input class="in" id="sIpNew" placeholder="Ví dụ 113.190.10.5 hoặc 113.190.10.0/24" style="flex:1"><button class="btn" id="sIpAdd" type="button">+ Thêm</button></div>
