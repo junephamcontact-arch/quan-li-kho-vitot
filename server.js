@@ -679,7 +679,16 @@ function parseOrderLines(text) {
    Sản phẩm ĐVT "Kg" mà SL >= 100: POS đang ghi theo GRAM -> quy về Kg và ghi chú chuyển đổi;
    quy ra > 50 Kg thì coi là BẤT THƯỜNG (không trừ — đẩy hàng chờ) để tránh trừ nhầm số khổng lồ. */
 function matchInEntries(line, entries) {
-  const e = (entries || []).find(x => normProdName(x.name) === normProdName(line.name));
+  let e = (entries || []).find(x => normProdName(x.name) === normProdName(line.name));
+  if (!e) {
+    // v41: hàng tặng POS còn ghi từ "Tặng" Ở GIỮA tên ("Nước Chấm Tặng Hải Sản" -> sản phẩm gốc
+    // "Nước Chấm Hải Sản") — parseOrderLines mới chỉ bỏ "(Quà Tặng)" và "Tặng" ở CUỐI tên.
+    // Thử thêm biến thể bỏ hẳn từ độc lập "Tặng" ở mọi vị trí (gộp lại khoảng trắng thừa);
+    // vẫn là khớp CHÍNH XÁC theo tên sau chuẩn hoá, không khớp mờ. Thứ tự: tên gốc trước,
+    // biến thể này sau — trúng cái nào trước dùng cái đó.
+    const alt = dispProdName(String(line.name || '').split(/\s+/).filter(w => w.toLowerCase() !== 'tặng').join(' '));
+    if (alt && normProdName(alt) !== normProdName(line.name)) e = (entries || []).find(x => normProdName(x.name) === normProdName(alt));
+  }
   if (!e) return null;
   let qty = line.qty, convNote = '';
   if ((e.unit || '') === 'Kg' && qty >= 100) {
@@ -1242,6 +1251,32 @@ async function persistArrivalConfirmations() { await setSetting('arrival_confirm
 
 /* ---------------- Tạo phiếu → ghi xuống Sheet ---------------- */
 const PREFIX = { in: 'NH', out: 'XH', check: 'KK', process: 'CB', recon: 'DS' };
+/* v41: khối "Hàng đã xuất theo phiên này" cho chi tiết 1 phiên ĐỐI SOÁT — phiếu xuất hệ thống
+   trừ kho của phiên + các dòng chưa trừ được của phiên. Nguồn tra: sổ deducted_orders
+   (mã đơn -> {sessionCode, slipCode}; chỉ lấy mục thuộc ĐÚNG phiên này) cho mã phiếu xuất,
+   state.slips cho chính phiếu xuất đó (là phiếu thường nên đọc lại được từ Sheet sau khi
+   server khởi động lại), và hàng chờ deduct_review lọc theo sessionCode của phiên.
+   sku của từng dòng tra ngược POS bằng cùng quy tắc v35 (mã chuẩn hoá + tên; mơ hồ -> ''). */
+function reconDeductionOf(reconSlip, skuByKey, canon) {
+  const codes = [...new Set((reconSlip.lines || []).map(l => String(l.code || '').trim()).filter(Boolean))];
+  let slipCode = '';
+  for (const c of codes) {
+    const reg = state.deductedOrders[c];
+    if (reg && reg.slipCode && (!reg.sessionCode || reg.sessionCode === reconSlip.code)) { slipCode = reg.slipCode; break; }
+  }
+  let lines = [];
+  if (slipCode) {
+    const outSlip = state.slips.find(s => s.type === 'out' && s.code === slipCode);
+    if (outSlip) lines = (outSlip.lines || []).map(l => {
+      const c = canon.get(l.sampleCode || '') || l.sampleCode || '';
+      const set = skuByKey.get(c + '\u0002' + normProdName(l.name || ''));
+      return { sku: set && set.size === 1 ? [...set][0] : '', sampleCode: l.sampleCode || '', name: l.name || '', qty: Number(l.qty) || 0, unit: l.unit || '' };
+    });
+  }
+  const review = state.deductReview.filter(x => x.sessionCode === reconSlip.code)
+    .map(x => ({ orderCode: x.orderCode, lineText: x.lineText, reason: x.reason }));
+  return { slipCode: slipCode || null, lines, review };
+}
 function stripBlind(slip, viewer) {
   const copy = JSON.parse(JSON.stringify(slip));
   delete copy.rowRefs;
@@ -1255,16 +1290,16 @@ function stripBlind(slip, viewer) {
   // v35 (chỉ HIỂN THỊ, cộng thêm trường): bổ sung Mã SP (cột "Mã sản phẩm" của POS) cho từng dòng
   // phiếu — dòng phiếu chỉ lưu Mã mẫu nên tra ngược POS theo mã chuẩn hoá + TÊN; khớp mơ hồ
   // (nhiều Mã SP khác nhau cùng định danh) hoặc không khớp thì để trống, client hiện "—".
+  const canon = buildCanon();
+  const skuByKey = new Map();
+  for (const i of state.inventory.items) {
+    if (!i.sku) continue;
+    const c = canon.get(i.sampleCode || i.sku) || i.sampleCode || i.sku || '';
+    const k = c + '\u0002' + normProdName(productLabel(i, null));
+    let set = skuByKey.get(k); if (!set) { set = new Set(); skuByKey.set(k, set); }
+    set.add(i.sku);
+  }
   if (copy.type !== 'recon') {
-    const canon = buildCanon();
-    const skuByKey = new Map();
-    for (const i of state.inventory.items) {
-      if (!i.sku) continue;
-      const c = canon.get(i.sampleCode || i.sku) || i.sampleCode || i.sku || '';
-      const k = c + '\u0002' + normProdName(productLabel(i, null));
-      let set = skuByKey.get(k); if (!set) { set = new Set(); skuByKey.set(k, set); }
-      set.add(i.sku);
-    }
     for (const l of copy.lines || []) {
       if (!l || (l.sampleCode === undefined && !l.name)) continue;
       const c = canon.get(l.sampleCode || '') || l.sampleCode || '';
@@ -1272,6 +1307,8 @@ function stripBlind(slip, viewer) {
       l.sku = set && set.size === 1 ? [...set][0] : '';
     }
   }
+  // v41: phiếu ĐỐI SOÁT kèm deduction (phiếu xuất trừ kho của phiên + dòng chưa trừ được)
+  if (copy.type === 'recon') copy.deduction = reconDeductionOf(copy, skuByKey, canon);
   return copy;
 }
 function productLabel(l, item) {
