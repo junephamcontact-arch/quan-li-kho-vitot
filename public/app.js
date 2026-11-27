@@ -1,5 +1,5 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v41.271126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v42.271126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -378,7 +378,23 @@ function reconDeductionHTML(s) {
   const lines = d.lines || [], review = d.review || [];
   let h = `<div style="margin-top:10px"><b>Hàng đã xuất theo phiên này</b>${d.slipCode ? ` <span class="mut">• Phiếu xuất ${esc(d.slipCode)}</span>` : ''}</div>`;
   if (lines.length) h += `<table class="tbl" style="margin-top:6px"><tr><th>STT</th><th>Mã SP</th><th>Mã mẫu</th><th>Tên sản phẩm</th><th>SL xuất thực tế</th><th>ĐVT</th></tr>${lines.map((l, i) => `<tr><td>${i + 1}</td><td>${esc(l.sku || '') || '—'}</td><td>${esc(l.sampleCode || '') || '—'}</td><td>${esc(l.name || '')}</td><td>${l.qty}</td><td>${esc(l.unit || '')}</td></tr>`).join('')}</table>`;
-  if (review.length) h += `<div class="mut" style="margin-top:8px"><b>Chưa trừ được (chờ quản lí xử lí):</b></div>${review.map(x => `<div class="mut">• ${esc(x.orderCode)} · ${esc(x.lineText)} — ${esc(x.reason)}</div>`).join('')}`;
+  if (review.length) {
+    // v42: gom các dòng chưa trừ theo MÃ ĐƠN — mỗi đơn 1 dòng duy nhất, các lineText nối bằng "; ",
+    // lý do chỉ ghi 1 lần ở cuối dòng nếu mọi dòng của đơn cùng lý do; khác lý do thì ghi trong ngoặc sau từng dòng.
+    const byOrder = new Map();
+    for (const x of review) {
+      if (!byOrder.has(x.orderCode)) byOrder.set(x.orderCode, []);
+      byOrder.get(x.orderCode).push(x);
+    }
+    const rows = [...byOrder.entries()].map(([code, items]) => {
+      const sameReason = items.every(x => x.reason === items[0].reason);
+      const body = sameReason
+        ? `${items.map(x => esc(x.lineText)).join('; ')} — ${esc(items[0].reason)}`
+        : items.map(x => `${esc(x.lineText)} (${esc(x.reason)})`).join('; ');
+      return `<div class="mut">• ${esc(code)} · ${body}</div>`;
+    }).join('');
+    h += `<div class="mut" style="margin-top:8px"><b>Chưa trừ được (chờ quản lí xử lí):</b></div>${rows}`;
+  }
   if (!lines.length && !review.length) h += `<div class="mut" style="margin-top:4px">Phiên này chưa trừ kho dòng nào.</div>`;
   return h;
 }
