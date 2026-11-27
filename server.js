@@ -153,7 +153,7 @@ async function gvizRows(sheetId, tab) {
 }
 
 /* ---------------- Trạng thái / bộ nhớ đệm ---------------- */
-const MODULES = ['dashboard', 'inventory', 'inbound', 'outbound', 'stocktake', 'processing', 'recon', 'history', 'calendar', 'calendar_manage'];
+const MODULES = ['dashboard', 'inventory', 'inbound', 'outbound', 'stocktake', 'processing', 'recon', 'history', 'calendar', 'calendar_manage', 'inbound_plan'];
 function systemRoles() {
   const all = {}; MODULES.forEach(m => all[m] = true);
   const staff = { inventory: true, inbound: true, outbound: true, stocktake: true, processing: true, recon: true, history: true, dashboard: false, calendar: true };
@@ -1054,6 +1054,9 @@ async function createSlip(user, body) {
     const checkerName = String(body.checker || '').trim();
     slip.checker = state.staff.some(s => s.active && s.name === checkerName) ? checkerName : user.name;
     slip.expectedDate = String(body.expectedDate || '').trim();
+    // v37: phiếu nhập CÓ "Ngày về dự kiến" = phiếu hàng ĐẶT TRƯỚC (hiện trên Lịch dạng "Hàng về") —
+    // đây là việc của QUẢN LÍ: chỉ tài khoản có quyền inbound_plan mới tạo được. Phiếu không có ngày về không bị ảnh hưởng.
+    if (slip.expectedDate && !permsOf(user).inbound_plan) throw new Error('Tài khoản của bạn không có quyền tạo phiếu nhập có ngày về dự kiến. Chỉ quản lí mới tạo phiếu hàng đặt trước.');
     slip.expectedKey = parseDateKey(slip.expectedDate);
     for (const l of linesIn) {
       const item = itemOf(l);
