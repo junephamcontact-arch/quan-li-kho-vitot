@@ -641,8 +641,13 @@ function posComparison(entries, q) {
    POS trực tiếp ở bất cứ đâu. Kho cửa hàng tự kiểm soát số lượng thực tế trong app; POS vẫn là
    mốc đối chiếu bên ngoài của ADMIN (các màn đối chiếu POS cũ giữ nguyên). */
 const DEDUCT_CATEGORY = 'Bán hàng (đối soát tự động)';
-function posStatusCancelled(st) { const s = String(st || '').toLowerCase(); return s.includes('hủy') || s.includes('huỷ'); }
-function posStatusGoodsOut(st) { const s = String(st || '').trim(); return s.includes('Đã gửi') || s === 'Đã nhận'; }
+/* Trạng thái POS trong ĐƠN_POS_ẨN có 2 thế hệ ghi: tiếng Việt ("Đã gửi hàng" / "Đã nhận" /
+   "Đã nhận tiền" / "Đã hủy đơn") và mã tiếng Anh (nguồn đổ đổi từ 27/11/2026: shipped /
+   delivered / received_money / cancelled ...). MỌI nơi đọc trạng thái đều qua 2 helper này. */
+const POS_GOODS_OUT_EN = new Set(['shipped', 'delivered', 'received_money']);
+const POS_CANCELLED_EN = new Set(['cancelled', 'canceled', 'returned', 'refunded']);
+function posStatusCancelled(st) { const s = String(st || '').toLowerCase(); return s.includes('hủy') || s.includes('huỷ') || POS_CANCELLED_EN.has(s.trim()); }
+function posStatusGoodsOut(st) { const s = String(st || '').trim(); return s.includes('Đã gửi') || s === 'Đã nhận' || s === 'Đã nhận tiền' || POS_GOODS_OUT_EN.has(s.toLowerCase()); }
 /* Số lượng trong text POS: "1000" / "1.000" (= 1000 — chấm là phân cách nghìn) / "1,5" (= 1.5) */
 function parsePosQty(raw) {
   const s = String(raw == null ? '' : raw).trim();
@@ -685,10 +690,11 @@ function matchInEntries(line, entries) {
   }
   return { entry: e, qty, convNote };
 }
-/* "Bán hôm nay": các dòng ĐƠN_POS_ẨN có ngày Cập nhật = hôm nay (Asia/Bangkok), bỏ đơn đã hủy.
-   qtyOut = phần thuộc đơn ĐÃ RA khỏi kho (trạng thái chứa "Đã gửi" hoặc đúng "Đã nhận");
-   qtyPending = phần thuộc các đơn còn lại chưa hủy. Dòng không khớp / bất thường chỉ đếm vào
-   unmatchedCount (không hiện số lượng — số của chúng không đáng tin để cộng vào bảng). */
+/* "Bán hôm nay": các dòng ĐƠN_POS_ẨN có ngày = hôm nay (Asia/Bangkok), bỏ đơn đã hủy.
+   qtyOut = phần thuộc đơn ĐÃ RA khỏi kho (posStatusGoodsOut: "Đã gửi…"/"Đã nhận"/"Đã nhận tiền"
+   hoặc shipped/delivered/received_money); qtyPending = phần thuộc các đơn còn lại chưa hủy.
+   Dòng không khớp / bất thường chỉ đếm vào unmatchedCount (không hiện số lượng — số của chúng
+   không đáng tin để cộng vào bảng). */
 function salesTodayData() {
   const tk = todayKey();
   const entries = warehouseEntries();
@@ -1077,6 +1083,26 @@ async function ensureCache() {
 }
 async function reloadCache() { state.loaded = false; await ensureCache(); }
 
+/* v40: nạp lại RIÊNG tab ĐƠN_POS_ẨN từ Sheet (không đụng các tab khác). Tab này được nguồn POS
+   đổ lại trong ngày nên cache từ lúc mở app có thể đã cũ — khi chốt phiên đối soát phải nạp bản
+   mới nhất để cột Nguồn đơn/Sản phẩm trên phiếu và bước tự trừ kho dùng đúng dữ liệu hiện tại. */
+async function reloadPosOrders() {
+  const sheetId = currentSheetId();
+  let rows;
+  if (WRITABLE) {
+    const meta = await sheetsApi('GET', `/v4/spreadsheets/${sheetId}`);
+    const titles = (meta.sheets || []).map(s => s.properties.title);
+    rows = titles.includes('ĐƠN_POS_ẨN') ? await apiValuesGet(sheetId, 'ĐƠN_POS_ẨN') : [];
+  } else {
+    try { rows = await gvizRows(sheetId, 'ĐƠN_POS_ẨN'); } catch { rows = []; }
+  }
+  state.tabRows['ĐƠN_POS_ẨN'] = rows.length;
+  state.posOrders = parsePosOrders(rows);
+  const pod = parsePosOrderDetails(rows);
+  state.posOrderRows = pod.rows;
+  state.posOrderById = pod.byId;
+}
+
 /* ---- Ghi 1 khóa vào APP_CAI_DAT ---- */
 async function setSetting(key, value) {
   if (!WRITABLE) return; // chỉ đọc: giữ trong bộ nhớ
@@ -1340,10 +1366,19 @@ async function createSlip(user, body, opts = {}) {
       rows.push([code, slip.warehouse, dt, item ? (item.sku || item.sampleCode) : (l.sampleCode || ''), label, inputQty, finishedSku, finishedName, posQty ? posQty : '', usable, discard, loss, line.usablePct, line.discardPct, line.lossPct, noteCell, user.name, '']);
     }
   } else if (type === 'recon') {
+    // v40: nạp lại ĐƠN_POS_ẨN ngay trước khi chốt phiên (tab được đổ lại trong ngày, cache có thể
+    // đã cũ) — cột F/G dưới đây và bước tự trừ kho chạy ngay sau createSlip đều dùng bản mới nhất.
+    // Nạp lỗi thì giữ cache cũ chứ không chặn việc chốt phiên.
+    try { await reloadPosOrders(); } catch { /* giữ dữ liệu đơn POS đã nạp trước đó */ }
     // Cho phép quét TRÙNG: mỗi lượt quét là 1 dòng (client đã hỏi xác nhận trước khi thêm dòng trùng)
     for (const l of linesIn) { const c = String(l.code || '').trim(); if (c) slip.lines.push({ code: c, warning: '' }); }
     if (!slip.lines.length) throw new Error('Chưa quét đơn nào.');
-    for (const l of slip.lines) rows.push([code, slip.warehouse, dt, user.name, l.code, '', '', 'Đã quét xuất kho', '']);
+    // Cột F "Nguồn đơn (POS)" + G "Sản phẩm (POS)": lấy từ bản ghi chi tiết của chính mã đơn trong
+    // ĐƠN_POS_ẨN; đơn không có trong tab thì để trống như trước.
+    for (const l of slip.lines) {
+      const rec = state.posOrderById.get(l.code);
+      rows.push([code, slip.warehouse, dt, user.name, l.code, rec ? (rec.source || '') : '', rec ? (rec.productsText || '') : '', 'Đã quét xuất kho', '']);
+    }
   }
   slip.rows = rows;
   slip.id = `${type}:${code}:local-${Date.now()}`;
