@@ -1,5 +1,5 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v40.271126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v41.271126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -364,11 +364,23 @@ function slipDetailHTML(s) {
   } else if (s.type === 'process') {
     tbl = `<table class="tbl"><tr><th>Mã SP</th><th>Mã mẫu</th><th>Nguyên liệu</th><th>Đầu vào</th><th>Thành phẩm</th><th>Bán được</th><th>Hủy</th><th>Hao hụt</th></tr>${(s.lines || []).map(l => `<tr><td>${esc(l.sku || '') || '—'}</td><td>${esc(l.sampleCode || '') || '—'}</td><td>${esc(l.name)}</td><td>${l.inputQty}</td><td>${esc(l.finishedName || '')}${l.posQty ? ` (${l.posQty})` : ''}</td><td>${l.usable} (${l.usablePct}%)</td><td>${l.discard} (${l.discardPct}%)</td><td>${l.loss} (${l.lossPct}%)</td></tr>`).join('')}</table>`;
   } else if (s.type === 'recon') {
-    tbl = `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${(s.lines || []).map(l => `<span class="recon-chip"><b>${esc(l.code)}</b></span>`).join('') || '<span class="mut">Không có mã nào.</span>'}</div><div class="mut" style="margin-top:6px">Tổng: ${(s.lines || []).length} mã quét</div>`;
+    tbl = `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${(s.lines || []).map(l => `<span class="recon-chip"><b>${esc(l.code)}</b></span>`).join('') || '<span class="mut">Không có mã nào.</span>'}</div><div class="mut" style="margin-top:6px">Tổng: ${(s.lines || []).length} mã quét</div>` + reconDeductionHTML(s);
   } else {
     tbl = `<table class="tbl"><tr><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>Số lượng</th><th>ĐVT</th><th>Ghi chú</th></tr>${(s.lines || []).map(l => `<tr><td>${esc(l.sku || '') || '—'}</td><td>${esc(l.sampleCode || '') || '—'}</td><td>${esc(l.name)}</td><td>${l.qty}</td><td>${esc(l.unit || '')}</td><td>${esc(l.note || '')}</td></tr>`).join('')}</table>`;
   }
   return head + tbl;
+}
+/* Khối "Hàng đã xuất theo phiên này" (v41): dùng chung modal chi tiết phiếu + Lịch sử mở rộng
+   cho phiếu ĐỐI SOÁT — dữ liệu từ s.deduction do server gắn (phiếu xuất trừ kho của phiên +
+   các dòng chưa trừ được đang chờ quản lí xử lí). */
+function reconDeductionHTML(s) {
+  const d = s.deduction; if (!d) return '';
+  const lines = d.lines || [], review = d.review || [];
+  let h = `<div style="margin-top:10px"><b>Hàng đã xuất theo phiên này</b>${d.slipCode ? ` <span class="mut">• Phiếu xuất ${esc(d.slipCode)}</span>` : ''}</div>`;
+  if (lines.length) h += `<table class="tbl" style="margin-top:6px"><tr><th>STT</th><th>Mã SP</th><th>Mã mẫu</th><th>Tên sản phẩm</th><th>SL xuất thực tế</th><th>ĐVT</th></tr>${lines.map((l, i) => `<tr><td>${i + 1}</td><td>${esc(l.sku || '') || '—'}</td><td>${esc(l.sampleCode || '') || '—'}</td><td>${esc(l.name || '')}</td><td>${l.qty}</td><td>${esc(l.unit || '')}</td></tr>`).join('')}</table>`;
+  if (review.length) h += `<div class="mut" style="margin-top:8px"><b>Chưa trừ được (chờ quản lí xử lí):</b></div>${review.map(x => `<div class="mut">• ${esc(x.orderCode)} · ${esc(x.lineText)} — ${esc(x.reason)}</div>`).join('')}`;
+  if (!lines.length && !review.length) h += `<div class="mut" style="margin-top:4px">Phiên này chưa trừ kho dòng nào.</div>`;
+  return h;
 }
 async function openSlipModal(code, type) {
   const wrap = $('#slipWrap'); if (!wrap) return;
@@ -1491,6 +1503,7 @@ VIEWS.history = async () => {
           <div class="mut">Người tạo: ${esc(s.creatorName)}${s.type === 'in' && s.expectedDate ? ` • Ngày về dự kiến: ${esc(s.expectedDate)}` : ''}${s.type === 'out' && s.exportType ? ` • Phân loại: ${esc(s.exportType)}` : ''}</div>
           ${arrivalLineHTML(s)}
           <table class="tbl" style="margin-top:6px">${s.type === 'check' ? '<tr><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>Đếm thực tế</th><th>Tồn hệ thống</th><th>Chênh lệch</th></tr>' : s.type === 'process' ? '<tr><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>Chi tiết</th></tr>' : s.type === 'recon' ? '' : '<tr><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>Số lượng / Ghi chú</th></tr>'}${detail}</table>
+          ${s.type === 'recon' ? reconDeductionHTML(s) : ''}
           ${wsLine}
         </div>
       </div>`;
