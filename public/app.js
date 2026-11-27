@@ -1,13 +1,13 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v36.271126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v37.271126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 /* ---------- Ngôn ngữ VI/EN ---------- */
 const I18N = {
-  vi: { dashboard: 'Dashboard', inventory: 'Tra cứu tồn kho', inbound: 'Nhập hàng', outbound: 'Xuất hàng', stocktake: 'Kiểm kho', processing: 'Chế biến / Sơ chế', recon: 'Đối soát đơn', calendar: 'Lịch', calendar_manage: 'Quản lí lịch (thêm / sửa / xoá sự kiện)', history: 'Lịch sử phiếu', settings: 'Cài đặt', logout: 'Đăng xuất', understood: 'Đã hiểu', activity: 'Hoạt động nhân viên', goods: 'Hàng hoá & Tồn kho', staffsum: 'Tổng hợp nhân viên' },
-  en: { dashboard: 'Dashboard', inventory: 'Inventory lookup', inbound: 'Goods receipt', outbound: 'Goods issue', stocktake: 'Stock check', processing: 'Processing', recon: 'Order audit', calendar: 'Calendar', calendar_manage: 'Manage calendar (add / edit / delete events)', history: 'Slip history', settings: 'Settings', logout: 'Log out', understood: 'OK, got it', activity: 'Staff activity', goods: 'Goods & stock', staffsum: 'Staff summary' }
+  vi: { dashboard: 'Dashboard', inventory: 'Tra cứu tồn kho', inbound: 'Nhập hàng', outbound: 'Xuất hàng', stocktake: 'Kiểm kho', processing: 'Chế biến / Sơ chế', recon: 'Đối soát đơn', calendar: 'Lịch', calendar_manage: 'Quản lí lịch (thêm / sửa / xoá sự kiện)', inbound_plan: 'Tạo phiếu nhập đặt trước (có ngày về dự kiến)', history: 'Lịch sử phiếu', settings: 'Cài đặt', logout: 'Đăng xuất', understood: 'Đã hiểu', activity: 'Hoạt động nhân viên', goods: 'Hàng hoá & Tồn kho', staffsum: 'Tổng hợp nhân viên' },
+  en: { dashboard: 'Dashboard', inventory: 'Inventory lookup', inbound: 'Goods receipt', outbound: 'Goods issue', stocktake: 'Stock check', processing: 'Processing', recon: 'Order audit', calendar: 'Calendar', calendar_manage: 'Manage calendar (add / edit / delete events)', inbound_plan: 'Create pre-order goods receipts (with expected arrival date)', history: 'Slip history', settings: 'Settings', logout: 'Log out', understood: 'OK, got it', activity: 'Staff activity', goods: 'Goods & stock', staffsum: 'Staff summary' }
 };
 let lang = localStorage.getItem('qk-lang') || 'vi';
 const t = k => (I18N[lang] && I18N[lang][k]) || I18N.vi[k] || k;
@@ -922,6 +922,9 @@ VIEWS.inbound = async () => {
   await loadProducts(false); // picker Nhập GIỮ danh mục POS — đây là cổng đưa mã MỚI vào kho
   await loadWhProducts(false); // dataset kho: chỉ để hiện thông tin tham khảo "đã nhập tổng / tồn hiện tại" cho mã đã từng nhập
   const L = S.boot.lists;
+  // v37: phiếu nhập CÓ ngày về dự kiến = phiếu hàng ĐẶT TRƯỚC — chỉ quản lí (quyền inbound_plan) mới tạo được;
+  // nhân viên không có quyền thì không hiện ô nhập ngày (server cũng chặn ở POST /api/slips).
+  const canPlan = !!(S.user && S.user.perms && S.user.perms.inbound_plan);
   v.innerHTML = `
   <div class="in-grid">
     <div class="card">
@@ -945,10 +948,14 @@ VIEWS.inbound = async () => {
         <span><input class="in" id="inSup" list="inSupList" placeholder="Chọn hoặc nhập tên NCC..." autocomplete="off">
         <datalist id="inSupList">${L.suppliers.map(s => `<option value="${esc(s)}"></option>`).join('')}</datalist></span></div>
       <div class="irow"><label>Ngày tạo phiếu: <span class="req">*</span></label><input class="in" id="inCreated" disabled value="${fmtAutoTime(new Date())}"></div>
-      <div class="irow"><label>Ngày về dự kiến:</label><input class="in" type="date" id="inExpected"></div>
+      ${canPlan
+        ? `<div class="irow"><label>Ngày về dự kiến:</label><input class="in" type="date" id="inExpected"></div>`
+        : `<div class="irow"><span class="mut">Ngày về dự kiến: chỉ quản lí mới tạo phiếu hàng đặt trước.</span></div>`}
       <div class="irow"><label>Người kiểm: <span class="req">*</span></label><div class="locked"><span class="lk">🔒</span><span>${esc(S.user.name)}</span></div></div>
       <button class="btn primary submit-lg" id="inSubmit">✓ Tạo phiếu nhập hàng</button>
-      <p class="mut" style="margin:10px 0 0">Phiếu tạo xong sẽ ghi thẳng xuống Sheet (tab NHẬP_HÀNG). Nếu có điền "Ngày về dự kiến", phiếu sẽ tự hiện trên màn Lịch (nhãn "Hàng về").</p>
+      ${canPlan
+        ? `<p class="mut" style="margin:10px 0 0">Phiếu tạo xong sẽ ghi thẳng xuống Sheet (tab NHẬP_HÀNG). Nếu có điền "Ngày về dự kiến", phiếu sẽ tự hiện trên màn Lịch (nhãn "Hàng về").</p>`
+        : `<p class="mut" style="margin:10px 0 0">Phiếu tạo xong sẽ ghi thẳng xuống Sheet (tab NHẬP_HÀNG). Phiếu hàng đặt trước (có "Ngày về dự kiến", hiện trên màn Lịch) do quản lí tạo.</p>`}
     </div>
   </div>`;
   const clock = setInterval(() => { const el = $('#inCreated'); if (!el || S.view !== 'inbound') { clearInterval(clock); return; } el.value = fmtAutoTime(new Date()); }, 20000);
@@ -1004,7 +1011,8 @@ VIEWS.inbound = async () => {
     if (!S.slipLines.length) return alertWarn('Chưa thêm sản phẩm', 'Gõ tên sản phẩm hoặc mã mẫu vào ô tìm kiếm phía trên để thêm vào phiếu nhập.');
     if (S.slipLines.some(l => !(Number(l.qty) > 0))) return alertWarn('Thiếu số lượng', 'Có dòng chưa nhập số lượng kiểm thực tế hợp lệ.');
     try {
-      const r = await post('/api/slips', { type: 'in', warehouse: $('#inWh').value, supplier: $('#inSup').value.trim(), expectedDate: $('#inExpected').value || '', lines: S.slipLines });
+      const expEl = $('#inExpected'); // chỉ tồn tại khi tài khoản có quyền inbound_plan (quản lí)
+      const r = await post('/api/slips', { type: 'in', warehouse: $('#inWh').value, supplier: $('#inSup').value.trim(), expectedDate: expEl ? (expEl.value || '') : '', lines: S.slipLines });
       if (r.slip.writeStatus === 'written') await alertOk('Đã tạo phiếu nhập hàng', `Phiếu ${r.slip.code} đã ghi xuống Sheet.\nNgười tạo: ${r.slip.creatorName} • ${r.slip.createdAt}`);
       else await alertWarn('Đã lưu phiếu, chưa ghi được Sheet', `Phiếu ${r.slip.code} đã lưu trong app nhưng ghi Sheet lỗi: ${r.slip.writeError}\nVào Lịch sử phiếu bấm "Ghi lại" khi đã xử lí xong lỗi.`);
       go('inbound');
@@ -1763,7 +1771,7 @@ VIEWS.settings = async () => {
   function loadRoles(pre) {
     let editingRoleId = null;
     const render = roles => {
-      const mods = ['dashboard','inventory','inbound','outbound','stocktake','processing','recon','calendar','calendar_manage','history'];
+      const mods = ['dashboard','inventory','inbound','outbound','stocktake','processing','recon','calendar','calendar_manage','inbound_plan','history'];
       if (!roles.roles.some(r => r.id === rolePickId)) rolePickId = (roles.roles[0] || {}).id || null;
       const pick = $('#sRolePick');
       pick.innerHTML = roles.roles.map(r => `<option value="${r.id}" ${r.id === rolePickId ? 'selected' : ''}>${esc(r.name)}${r.system ? ' (hệ thống)' : ''}</option>`).join('');
@@ -1773,7 +1781,7 @@ VIEWS.settings = async () => {
         ${editingRoleId === r.id
           ? `<div style="display:flex;gap:6px;align-items:center"><input class="in" style="height:34px;flex:1;min-width:0" value="${esc(r.name)}" data-rename-input="${r.id}" maxlength="60"><button class="btn" data-rename-save="${r.id}">Lưu</button><button class="btn" data-rename-cancel="1">Huỷ</button></div>`
           : `<b>${esc(r.name)}</b> ${r.system ? '<span class="pill">Hệ thống</span>' : ''}`}
-        <div class="perm-grid" style="margin-top:8px">${mods.map(m => `<div class="perm-row"><span class="perm-name">${I18N.vi[m]}</span><label class="switch"><input type="checkbox" data-rp="${r.id}:${m}" ${r.perms[m] ? 'checked' : ''} ${r.id === 'role-admin' ? 'disabled' : ''}><span class="track"></span></label></div>`).join('')}</div>
+        <div class="perm-grid" style="margin-top:8px">${mods.map(m => `<div class="perm-row"><span class="perm-name">${I18N.vi[m]}</span><label class="switch"><input type="checkbox" data-rp="${r.id}:${m}" ${r.id === 'role-admin' || r.perms[m] ? 'checked' : ''} ${r.id === 'role-admin' ? 'disabled' : ''}><span class="track"></span></label></div>`).join('')}</div>
         ${r.system ? `<p class="mut" style="margin:8px 0 0">Chức vụ hệ thống — không đổi tên / xoá được.${r.id === 'role-admin' ? ' ADMIN luôn có toàn quyền.' : ''}</p>` : ''}
         ${!r.system && editingRoleId !== r.id ? `<div style="display:flex;gap:6px;margin-top:8px"><button class="btn" data-rename-role="${r.id}">Đổi tên</button><button class="btn danger" data-del-role="${r.id}">Xoá chức vụ</button></div>` : ''}</div>` : '<p class="mut">Chưa có chức vụ nào.</p>';
       $$('#sRoles [data-rename-role]').forEach(b => b.onclick = () => { editingRoleId = b.dataset.renameRole; render(roles); const inp = $(`#sRoles [data-rename-input="${editingRoleId}"]`); if (inp) { inp.focus(); inp.select(); } });
@@ -1791,7 +1799,7 @@ VIEWS.settings = async () => {
         try { await api('/api/roles/' + rid, { method: 'PUT', body: JSON.stringify({ perms: role.perms }) }); toast('Đã cập nhật phân quyền'); } catch (e) { alertErr('Lỗi', e.message); }
       });
       $$('#sRoles [data-del-role]').forEach(b => b.onclick = async () => { if (!await showConfirm('Xoá chức vụ', 'Xoá chức vụ này?')) return; try { await api('/api/roles/' + b.dataset.delRole, { method: 'DELETE' }); rolePickId = null; loadStaff(); } catch (e) { alertErr('Không xoá được', e.message); } });
-      const mods2 = ['dashboard','inventory','inbound','outbound','stocktake','processing','recon','calendar','calendar_manage','history'];
+      const mods2 = ['dashboard','inventory','inbound','outbound','stocktake','processing','recon','calendar','calendar_manage','inbound_plan','history'];
       $('#sNewRolePerms').innerHTML = mods2.map(m => `<div class="perm-row"><span class="perm-name">${I18N.vi[m]}</span><label class="switch"><input type="checkbox" data-nrp="${m}"><span class="track"></span></label></div>`).join('');
     };
     if (pre) render(pre); else api('/api/roles').then(render);
