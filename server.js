@@ -502,6 +502,26 @@ function warehouseSummary(entries) {
   return { totalQty: Math.round(totalQty * 1000) / 1000, productCount };
 }
 
+/* Tra sản phẩm POS khớp với 1 định danh sổ kho (mã chuẩn hoá + TÊN, ưu tiên kèm kho) — cùng
+   thứ tự ưu tiên với /api/warehouse-products: mã+tên+kho → mã+tên → mã+kho → mã. */
+function findPosItem(code, name, warehouse) {
+  const sameCode = i => (i.sampleCode || i.sku) === code;
+  const sameName = i => normProdName(productLabel(i, null)) === normProdName(name);
+  return state.inventory.items.find(i => sameCode(i) && sameName(i) && i.warehouse === warehouse)
+    || state.inventory.items.find(i => sameCode(i) && sameName(i))
+    || state.inventory.items.find(i => sameCode(i) && i.warehouse === warehouse)
+    || state.inventory.items.find(sameCode)
+    || null;
+}
+/* Mã hiển thị (v35): Mã SP = cột "Mã sản phẩm" của POS, Mã mẫu = cột "Mã mẫu" của POS.
+   Tra từ sản phẩm POS khớp (mã + tên); không tra được thì Mã SP để trống (client hiện "—")
+   và Mã mẫu lấy mã đã ghi trên phiếu (đó là mã ở cột Mã mẫu của tab phiếu). Không bao giờ bịa mã. */
+function resolveProdCodes(code, name, warehouse) {
+  const pos = findPosItem(code, name, warehouse);
+  if (!pos) return { sku: '', sampleCode: code || '' };
+  return { sku: pos.sku || '', sampleCode: pos.sampleCode || (pos.sku === code ? '' : (code || '')) };
+}
+
 /* Đối chiếu kho cửa hàng (sổ kho) ↔ kho POS chính (tab TỒN_KHO_POS) — CHỈ ADMIN mới được xem.
    Khớp sản phẩm theo mã đã chuẩn hoá + TÊN (đúng định danh của dataset kho); sản phẩm chỉ có ở
    1 phía vẫn liệt kê (phía còn lại tính 0). Chênh lệch = tồn kho cửa hàng − tồn POS chính.
@@ -521,10 +541,15 @@ function posComparison(entries, q) {
     const label = productLabel(i, null);
     const k = c + '\u0002' + normProdName(label);
     let g = posGroups.get(k);
-    if (!g) { g = { code: c, name: dispProdName(label), posStock: 0, warehouses: [] }; posGroups.set(k, g); }
+    if (!g) { g = { code: c, name: dispProdName(label), posStock: 0, warehouses: [], skus: new Set(), samples: new Set() }; posGroups.set(k, g); }
     g.posStock = round3(g.posStock + (Number(i.stock) || 0));
     if (i.warehouse && !g.warehouses.includes(i.warehouse)) g.warehouses.push(i.warehouse);
+    if (i.sku) g.skus.add(i.sku);
+    if (i.sampleCode) g.samples.add(i.sampleCode);
   }
+  // Nhóm POS gộp nhiều dòng: chỉ hiện mã khi TOÀN NHÓM có đúng 1 giá trị khác nhau — gộp nhiều
+  // Mã SP / Mã mẫu khác nhau thì để trống (client hiện "—") chứ không đoán (v35).
+  const singleOf = set => set.size === 1 ? [...set][0] : '';
   const storeGroups = new Map(); // nhóm kho cửa hàng theo mã + tên
   for (const e of entries) {
     const k = e.code + '\u0002' + normProdName(e.name);
@@ -540,11 +565,12 @@ function posComparison(entries, q) {
     const p = posGroups.get(k);
     if (p) matchedPos.add(k);
     const pos = p ? p.posStock : 0;
-    rows.push({ code: g.code, name: g.name, warehouse: g.warehouses.join(', '), unit: g.unit, storeStock: g.storeStock, posStock: pos, diff: round3(g.storeStock - pos) });
+    const codes = p ? { sku: singleOf(p.skus), sampleCode: singleOf(p.samples) } : resolveProdCodes(g.code, g.name, '');
+    rows.push({ code: g.code, name: g.name, warehouse: g.warehouses.join(', '), unit: g.unit, storeStock: g.storeStock, posStock: pos, diff: round3(g.storeStock - pos), sku: codes.sku, sampleCode: codes.sampleCode });
   }
   for (const [k, g] of posGroups) {
     if (matchedPos.has(k)) continue;
-    rows.push({ code: g.code, name: g.name, warehouse: g.warehouses.join(', '), unit: '', storeStock: 0, posStock: g.posStock, diff: round3(-g.posStock) });
+    rows.push({ code: g.code, name: g.name, warehouse: g.warehouses.join(', '), unit: '', storeStock: 0, posStock: g.posStock, diff: round3(-g.posStock), sku: singleOf(g.skus), sampleCode: singleOf(g.samples) });
   }
   rows.sort((a, b) => (Math.abs(b.diff) - Math.abs(a.diff)) || a.name.localeCompare(b.name, 'vi'));
   const totalRows = rows.length;
@@ -949,6 +975,26 @@ function stripBlind(slip, viewer) {
     if (copy.type === 'check') for (const l of copy.lines || []) { delete l.systemStock; delete l.variance; delete l.matchStatus; }
     if (copy.type === 'recon') for (const l of copy.lines || []) delete l.warning;
   }
+  // v35 (chỉ HIỂN THỊ, cộng thêm trường): bổ sung Mã SP (cột "Mã sản phẩm" của POS) cho từng dòng
+  // phiếu — dòng phiếu chỉ lưu Mã mẫu nên tra ngược POS theo mã chuẩn hoá + TÊN; khớp mơ hồ
+  // (nhiều Mã SP khác nhau cùng định danh) hoặc không khớp thì để trống, client hiện "—".
+  if (copy.type !== 'recon') {
+    const canon = buildCanon();
+    const skuByKey = new Map();
+    for (const i of state.inventory.items) {
+      if (!i.sku) continue;
+      const c = canon.get(i.sampleCode || i.sku) || i.sampleCode || i.sku || '';
+      const k = c + '\u0002' + normProdName(productLabel(i, null));
+      let set = skuByKey.get(k); if (!set) { set = new Set(); skuByKey.set(k, set); }
+      set.add(i.sku);
+    }
+    for (const l of copy.lines || []) {
+      if (!l || (l.sampleCode === undefined && !l.name)) continue;
+      const c = canon.get(l.sampleCode || '') || l.sampleCode || '';
+      const set = skuByKey.get(c + '\u0002' + normProdName(l.name || ''));
+      l.sku = set && set.size === 1 ? [...set][0] : '';
+    }
+  }
   return copy;
 }
 function productLabel(l, item) {
@@ -1107,7 +1153,7 @@ async function api(req, res, url) {
     // tên + mã + phân loại + kho + danh mục (đủ để chọn sản phẩm), KHÔNG có tồn/bán POS.
     const blind = url.searchParams.get('blind') === '1' || !isAdmin(user);
     if (blind) {
-      const items = state.inventory.items.map(i => ({ key: i.key, name: i.name, variant: i.variant, sampleCode: i.sampleCode, warehouse: i.warehouse, category: i.category }));
+      const items = state.inventory.items.map(i => ({ key: i.key, sku: i.sku, name: i.name, variant: i.variant, sampleCode: i.sampleCode, warehouse: i.warehouse, category: i.category }));
       return send(res, 200, { items });
     }
     // ADMIN: kèm warehouses[] (tách từ chuỗi "Kho thao tác") + ĐVT (tra từ sổ kho theo mã + tên;
@@ -1150,9 +1196,11 @@ async function api(req, res, url) {
         || state.inventory.items.find(i => sameCode(i) && sameName(i))
         || state.inventory.items.find(i => sameCode(i) && i.warehouse === e.warehouse)
         || state.inventory.items.find(sameCode);
+      const codes = resolveProdCodes(e.code, e.name, e.warehouse);
       const base = {
         key: 'wh:' + e.warehouse + '\u0001' + e.code + '\u0001' + normProdName(e.name),
         warehouse: e.warehouse, code: e.code, name: e.name, unit: e.unit,
+        sku: codes.sku, sampleCode: codes.sampleCode,
         category: pos ? pos.category : '', posKey: pos ? pos.key : ''
       };
       return blind ? base : { ...base, totalIn: e.totalIn, totalOut: e.totalOut, processIn: e.processIn, balance: e.stock, lastInAt: e.lastInAt };
@@ -1178,9 +1226,14 @@ async function api(req, res, url) {
     items.sort((a, b) => a.name.localeCompare(b.name, 'vi'));
     const page = Math.max(1, parseInt(url.searchParams.get('page') || '1'));
     const size = 100;
+    // v35 (chỉ hiển thị): kèm Mã SP + Mã mẫu tra từ POS cho từng dòng sổ kho (không đổi số liệu).
+    const paged = items.slice((page - 1) * size, page * size).map(e => {
+      const codes = resolveProdCodes(e.code, e.name, e.warehouse);
+      return { ...e, sku: codes.sku, sampleCode: codes.sampleCode };
+    });
     // warehouseStock = tổng hợp TOÀN BỘ kho bằng đúng hàm warehouseSummary như bootstrap —
     // client dùng nó cập nhật chip "Tồn kho" trên thanh đầu để chip/tóm tắt/bảng không bao giờ lệch nhau.
-    const out = { counts, summary, warehouseStock: warehouseSummary(), total: items.length, page, items: items.slice((page - 1) * size, page * size), syncedAt: state.inventory.syncedAt, source: 'warehouse-ledger' };
+    const out = { counts, summary, warehouseStock: warehouseSummary(), total: items.length, page, items: paged, syncedAt: state.inventory.syncedAt, source: 'warehouse-ledger' };
     // Đối chiếu với kho POS chính: CHỈ ADMIN — nhân viên không nhận được bất kỳ số POS nào qua API này.
     // Bảng đối chiếu lọc theo CÙNG ô tìm kiếm q của màn Tra cứu (tổng kết lệch vẫn tính trên toàn bộ).
     if (isAdmin(user)) out.posCompare = posComparison(inWh, q);
@@ -1408,9 +1461,10 @@ async function api(req, res, url) {
         const pk = prodKeyOf(cl.warehouse, cl.code, cl.name);
         const id = `KK:${cl.slipCode}:${pk}`;
         const disc = discMap.get(id);
+        const codes = resolveProdCodes(cl.code, cl.name, cl.warehouse);
         return {
           slipCode: cl.slipCode, at: cl.at, timeKey: cl.timeKey, dateKey: cl.dateKey, user: cl.user, warehouse: cl.warehouse,
-          productKey: pk, name: cl.name, unit: cl.unit, book: cl.book, counted: cl.counted, varBook: cl.varBook,
+          productKey: pk, name: cl.name, unit: cl.unit, sku: codes.sku, sampleCode: codes.sampleCode, book: cl.book, counted: cl.counted, varBook: cl.varBook,
           posNow, varPos: round3(cl.counted - posNow), discrepancyId: id,
           status: disc ? disc.status : 'open', note: disc ? disc.note : ''
         };
@@ -1478,9 +1532,10 @@ async function api(req, res, url) {
       .sort((a, b) => b.timeKey.localeCompare(a.timeKey) || b.code.localeCompare(a.code))
       .map(ev => ({ at: ev.at, type: ev.type, code: ev.code, by: ev.by, delta: ev.delta, balanceAfter: ev.balanceAfter, counted: ev.counted, book: ev.book }));
     const pos = posStockByProdKey().get((e ? e.code : canonCode) + '\u0002' + normProdName(e ? e.name : name));
+    const codes = resolveProdCodes(e ? e.code : canonCode, e ? e.name : name, e ? e.warehouse : wh);
     const entry = e
-      ? { warehouse: e.warehouse, code: e.code, name: e.name, unit: e.unit, stock: e.stock, totalIn: e.totalIn, totalOut: e.totalOut, processIn: e.processIn, posStock: pos ? pos.stock : 0 }
-      : { warehouse: wh, code: canonCode, name: dispProdName(name), unit: '', stock: 0, totalIn: 0, totalOut: 0, processIn: 0, posStock: pos ? pos.stock : 0 };
+      ? { warehouse: e.warehouse, code: e.code, name: e.name, unit: e.unit, sku: codes.sku, sampleCode: codes.sampleCode, stock: e.stock, totalIn: e.totalIn, totalOut: e.totalOut, processIn: e.processIn, posStock: pos ? pos.stock : 0 }
+      : { warehouse: wh, code: canonCode, name: dispProdName(name), unit: '', sku: codes.sku, sampleCode: codes.sampleCode, stock: 0, totalIn: 0, totalOut: 0, processIn: 0, posStock: pos ? pos.stock : 0 };
     return send(res, 200, { entry, events });
   }
 
