@@ -176,6 +176,10 @@ const state = {
   exportCategories: null, // null = dùng mặc định; mảng tên phân loại xuất kho (APP_CAI_DAT: export_categories)
   calendarEvents: [],   // sự kiện lịch kiểu Google Calendar (APP_CAI_DAT: calendar_events)
   posOrders: [],        // đơn POS kỳ vọng đối soát, đọc từ tab ĐƠN_POS_ẨN: {dateKey, orderId}
+  posOrderRows: [],     // v39: chi tiết từng dòng đơn POS từ ĐƠN_POS_ẨN: {orderId, dateKey, updated, source, productsText, status}
+  posOrderById: new Map(), // v39: mã đơn -> dòng chi tiết MỚI NHẤT (cho tra cứu khi chốt đối soát)
+  deductedOrders: {},   // v39: đơn đã tự trừ kho (APP_CAI_DAT: deducted_orders): mã đơn -> {at, sessionCode, slipCode}
+  deductReview: [],     // v39: dòng bán chưa trừ được (APP_CAI_DAT: deduct_review): [{id, orderCode, lineText, reason, at, sessionCode, by}]
   discrepancyStatus: {}, // trạng thái xử lí chênh lệch (APP_CAI_DAT: discrepancy_status): id -> {status, note, by, at}
   arrivalConfirmations: {}, // xác nhận nhận hàng (APP_CAI_DAT: arrival_confirmations): mã phiếu nhập -> {history: [{action:'confirm'|'unconfirm', by, at, note?, shortage?}]}
   settingsRows: {},     // APP_CAI_DAT: key -> số dòng
@@ -334,6 +338,57 @@ function parsePosOrders(rows) {
     if (seen.has(k)) continue;
     seen.add(k);
     out.push({ dateKey, orderId });
+  }
+  return out;
+}
+
+/* ---- v39: CHI TIẾT đơn POS từ ĐƠN_POS_ẨN (sản phẩm dạng TEXT + trạng thái) ----
+   Cùng cách đọc chịu lệch cột với parsePosOrders: tra theo TÊN cột, ô không đúng kỳ vọng thì
+   dự phòng bằng cách nhận diện nội dung ô (ô ngày giờ / ô chứa "(xSL)"). Cột theo dữ liệu thật:
+   A mã đơn | B mã đơn/mã phụ | C nguồn | D sản phẩm text | E trạng thái | F cập nhật lúc.
+   Kết quả: rows = 1 bản ghi / (ngày cập nhật + mã đơn); byId = bản ghi MỚI NHẤT của mỗi mã đơn. */
+function parsePosOrderDetails(rows) {
+  const out = { rows: [], byId: new Map() };
+  if (!rows.length) return out;
+  const headers = rows[0].map(h => String(h || '').trim());
+  const idIdx = headers.indexOf('ID đơn hàng');
+  const updIdx = headers.indexOf('Cập nhật lúc');
+  const prodIdx = headers.indexOf('Sản phẩm');
+  const stIdx = headers.indexOf('Trạng thái POS mới nhất');
+  const srcIdx = headers.indexOf('Nguồn đơn');
+  const seen = new Set();
+  for (const r of rows.slice(1)) {
+    const cells = (r || []).map(c => String(c == null ? '' : c).trim());
+    if (!cells.some(Boolean)) continue;
+    let updI = (updIdx >= 0 && /^\d{4}-\d{2}-\d{2}/.test(cells[updIdx] || '')) ? updIdx : -1;
+    if (updI < 0) for (let i = cells.length - 1; i >= 0; i--) {
+      if (/^\d{4}-\d{2}-\d{2}[ T]\d{1,2}:\d{2}/.test(cells[i]) || /^\d{4}-\d{2}-\d{2}$/.test(cells[i])) { updI = i; break; }
+    }
+    if (updI < 0) continue;
+    const updated = cells[updI];
+    const dateKey = parseDateKey(updated);
+    if (!dateKey) continue;
+    let orderId = idIdx >= 0 ? (cells[idIdx] || '') : '';
+    if (!orderId || orderId === updated) orderId = cells.find(c => c && c !== updated) || '';
+    if (!orderId) continue;
+    // Sản phẩm: ô tại vị trí header nếu chứa "(x"; không thì ô dài nhất có chứa "(xSL)"
+    let productsText = '';
+    if (prodIdx >= 0 && /\(x[\d.,]+\)/.test(cells[prodIdx] || '')) productsText = cells[prodIdx];
+    else for (const c of cells) if (/\(x[\d.,]+\)/.test(c) && c.length > productsText.length) productsText = c;
+    // Trạng thái: ô tại vị trí header nếu hợp lệ (không phải ngày giờ / sản phẩm / mã đơn);
+    // không thì ô ngay trước ô "Cập nhật lúc" (bố cục dữ liệu thật bị lệch 1 cột so với header)
+    let status = '';
+    const stCand = stIdx >= 0 ? (cells[stIdx] || '') : '';
+    if (stCand && stCand !== updated && stCand !== productsText && stCand !== orderId && !/\(x[\d.,]+\)/.test(stCand) && !/^\d{4}-\d{2}-\d{2}/.test(stCand)) status = stCand;
+    if (!status && updI > 0) { const c = cells[updI - 1]; if (c && c !== productsText && c !== orderId && c !== updated) status = c; }
+    const source = (srcIdx >= 0 && cells[srcIdx] && cells[srcIdx] !== productsText && cells[srcIdx] !== orderId) ? cells[srcIdx] : '';
+    const k = dateKey + '\u0001' + orderId;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const rec = { orderId, dateKey, updated, source, productsText, status };
+    out.rows.push(rec);
+    const prev = out.byId.get(orderId);
+    if (!prev || updated >= prev.updated) out.byId.set(orderId, rec);
   }
   return out;
 }
@@ -581,6 +636,165 @@ function posComparison(entries, q) {
   return { rows: filtered, mismatchCount, totalRows };
 }
 
+/* ================= v39: BÁN HÔM NAY + TỰ TRỪ KHO KHI CHỐT ĐỐI SOÁT =================
+   Nguồn dữ liệu đơn: CHỈ tab ĐƠN_POS_ẨN (state.posOrderRows / posOrderById) — app KHÔNG gọi
+   POS trực tiếp ở bất cứ đâu. Kho cửa hàng tự kiểm soát số lượng thực tế trong app; POS vẫn là
+   mốc đối chiếu bên ngoài của ADMIN (các màn đối chiếu POS cũ giữ nguyên). */
+const DEDUCT_CATEGORY = 'Bán hàng (đối soát tự động)';
+function posStatusCancelled(st) { const s = String(st || '').toLowerCase(); return s.includes('hủy') || s.includes('huỷ'); }
+function posStatusGoodsOut(st) { const s = String(st || '').trim(); return s.includes('Đã gửi') || s === 'Đã nhận'; }
+/* Số lượng trong text POS: "1000" / "1.000" (= 1000 — chấm là phân cách nghìn) / "1,5" (= 1.5) */
+function parsePosQty(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (/^\d{1,3}(\.\d{3})+$/.test(s)) return Number(s.replace(/\./g, ''));
+  return numVN(s);
+}
+/* Bóc tách text sản phẩm của 1 đơn: "Tên A (x1), Tên B (x1000)" -> [{rawName, name, qty, gift, lineText}].
+   Hàng TẶNG vẫn trừ kho theo sản phẩm gốc: khi khớp, bỏ đoạn "(Quà Tặng)" ở giữa tên hoặc
+   từ "Tặng" ở CUỐI tên (2 dạng ghi trên POS: "Chẩm Chéo Khô (Quà Tặng)" / "Ruốc Tôm Tặng"). */
+function parseOrderLines(text) {
+  const out = [];
+  const re = /(.+?) \(x([\d.,]+)\)(?:, |$)/g;
+  let m;
+  const t = String(text || '');
+  while ((m = re.exec(t)) !== null) {
+    const rawName = dispProdName(m[1]);
+    const qty = parsePosQty(m[2]);
+    if (!rawName || !(qty > 0)) continue;
+    let gift = false, name = rawName;
+    if (/\(quà tặng\)/i.test(name)) { gift = true; name = dispProdName(name.replace(/\s*\(quà tặng\)\s*/gi, ' ')); }
+    if (/\stặng$/i.test(name)) { gift = true; name = dispProdName(name.replace(/\s+tặng$/i, '')); }
+    out.push({ rawName, name, qty, gift, lineText: `${rawName} (x${m[2]})` });
+  }
+  return out;
+}
+/* Khớp 1 dòng đơn với sản phẩm kho theo TÊN đã chuẩn hoá (đúng định danh sổ kho — tên ghi trên
+   phiếu), khớp CHÍNH XÁC, không khớp mờ. entries = sản phẩm kho đã lọc sẵn (theo kho của phiên
+   khi trừ kho; toàn bộ kho khi tính "Bán hôm nay"). Không khớp -> null.
+   Sản phẩm ĐVT "Kg" mà SL >= 100: POS đang ghi theo GRAM -> quy về Kg và ghi chú chuyển đổi;
+   quy ra > 50 Kg thì coi là BẤT THƯỜNG (không trừ — đẩy hàng chờ) để tránh trừ nhầm số khổng lồ. */
+function matchInEntries(line, entries) {
+  const e = (entries || []).find(x => normProdName(x.name) === normProdName(line.name));
+  if (!e) return null;
+  let qty = line.qty, convNote = '';
+  if ((e.unit || '') === 'Kg' && qty >= 100) {
+    const kg = round3(qty / 1000);
+    if (kg > 50) return { entry: e, abnormal: true };
+    convNote = `${e.name}: ${qty}g → ${kg} Kg`;
+    qty = kg;
+  }
+  return { entry: e, qty, convNote };
+}
+/* "Bán hôm nay": các dòng ĐƠN_POS_ẨN có ngày Cập nhật = hôm nay (Asia/Bangkok), bỏ đơn đã hủy.
+   qtyOut = phần thuộc đơn ĐÃ RA khỏi kho (trạng thái chứa "Đã gửi" hoặc đúng "Đã nhận");
+   qtyPending = phần thuộc các đơn còn lại chưa hủy. Dòng không khớp / bất thường chỉ đếm vào
+   unmatchedCount (không hiện số lượng — số của chúng không đáng tin để cộng vào bảng). */
+function salesTodayData() {
+  const tk = todayKey();
+  const entries = warehouseEntries();
+  const byName = new Map();
+  let unmatchedCount = 0;
+  for (const row of state.posOrderRows) {
+    if (row.dateKey !== tk) continue;
+    if (posStatusCancelled(row.status)) continue;
+    const isOut = posStatusGoodsOut(row.status);
+    for (const line of parseOrderLines(row.productsText)) {
+      const m = matchInEntries(line, entries);
+      if (!m || m.abnormal) { unmatchedCount++; continue; }
+      const k = normProdName(m.entry.name);
+      let it = byName.get(k);
+      if (!it) { it = { name: m.entry.name, unit: m.entry.unit || '', qtyOut: 0, qtyPending: 0, orders: new Set() }; byName.set(k, it); }
+      if (isOut) it.qtyOut = round3(it.qtyOut + m.qty); else it.qtyPending = round3(it.qtyPending + m.qty);
+      it.orders.add(row.orderId);
+    }
+  }
+  const items = [...byName.values()].map(it => ({ name: it.name, unit: it.unit, qtyOut: it.qtyOut, qtyPending: it.qtyPending, orders: it.orders.size }));
+  items.sort((a, b) => (b.qtyOut - a.qtyOut) || a.name.localeCompare(b.name, 'vi'));
+  return { date: tk, items, unmatchedCount };
+}
+/* Số đã bán hôm nay (đơn đã giao) CHƯA được trừ kho, gộp theo TÊN sản phẩm: đơn có mã trong sổ
+   deducted_orders là đã trừ rồi. "Tồn thực tế" hiển thị = Tồn sổ − số này (theo từng sản phẩm). */
+function soldUndeductedByName() {
+  const tk = todayKey();
+  const entries = warehouseEntries();
+  const map = new Map();
+  for (const row of state.posOrderRows) {
+    if (row.dateKey !== tk) continue;
+    if (posStatusCancelled(row.status) || !posStatusGoodsOut(row.status)) continue;
+    if (state.deductedOrders[row.orderId]) continue;
+    for (const line of parseOrderLines(row.productsText)) {
+      const m = matchInEntries(line, entries);
+      if (!m || m.abnormal) continue;
+      const k = normProdName(m.entry.name);
+      map.set(k, round3((map.get(k) || 0) + m.qty));
+    }
+  }
+  return map;
+}
+async function persistDeductedOrders() { try { await setSetting('deducted_orders', JSON.stringify(state.deductedOrders)); } catch (e) { /* chỉ đọc: giữ trong bộ nhớ */ } }
+async function persistDeductReview() { try { await setSetting('deduct_review', JSON.stringify(state.deductReview)); } catch (e) { /* chỉ đọc: giữ trong bộ nhớ */ } }
+/* TỰ TRỪ KHO khi CHỐT 1 phiên đối soát — chạy SAU khi phiếu phiên đã vào pipeline ghi Sheet:
+   mỗi mã đơn phân biệt chỉ xử lí 1 lần theo sổ deducted_orders (quét lại ở phiên sau không trừ
+   trùng). Đơn chưa giao / đã hủy: bỏ qua và KHÔNG đánh dấu (phiên sau, khi đơn đã giao, vẫn trừ
+   được). Đơn không có trong ĐƠN_POS_ẨN: bỏ qua, không đánh dấu. Dòng không khớp / bất thường ->
+   hàng chờ deduct_review cho ADMIN xử lí. Đơn khớp ÍT NHẤT 1 dòng -> được đánh dấu đã trừ bằng
+   phiếu xuất hệ thống của cả phiên; đơn 0 dòng khớp thì không đánh dấu. */
+async function processReconDeduction(user, session) {
+  const summary = { deducted: 0, alreadyDeducted: 0, notDelivered: 0, noData: 0, reviewLines: 0, slipCode: '' };
+  const codes = [...new Set((session.lines || []).map(l => String(l.code || '').trim()).filter(Boolean))];
+  if (!codes.length) return summary;
+  const entries = warehouseEntries().filter(e => e.warehouse === (session.warehouse || ''));
+  const perProduct = new Map();
+  const markable = [];
+  const pushReview = (orderCode, lineText, reason) => {
+    state.deductReview.push({ id: 'dr-' + crypto.randomBytes(6).toString('hex'), orderCode, lineText, reason, at: nowText(), sessionCode: session.code, by: user.name });
+    summary.reviewLines++;
+  };
+  for (const code of codes) {
+    if (state.deductedOrders[code]) { summary.alreadyDeducted++; continue; }
+    const rec = state.posOrderById.get(code);
+    if (!rec) { summary.noData++; continue; }
+    if (posStatusCancelled(rec.status) || !posStatusGoodsOut(rec.status)) { summary.notDelivered++; continue; }
+    let matched = 0;
+    for (const line of parseOrderLines(rec.productsText)) {
+      const m = matchInEntries(line, entries);
+      if (!m) { pushReview(code, line.lineText, 'không khớp sản phẩm kho'); continue; }
+      if (m.abnormal) { pushReview(code, line.lineText, 'số lượng bất thường'); continue; }
+      matched++;
+      const k = entryKeyOf(m.entry.warehouse, m.entry.code, m.entry.name);
+      let agg = perProduct.get(k);
+      if (!agg) { agg = { entry: m.entry, qty: 0, orders: new Set(), notes: [] }; perProduct.set(k, agg); }
+      agg.qty = round3(agg.qty + m.qty);
+      agg.orders.add(code);
+      if (m.convNote && !agg.notes.includes(m.convNote)) agg.notes.push(m.convNote);
+    }
+    if (matched > 0) markable.push(code);
+  }
+  if (perProduct.size) {
+    const lines = [...perProduct.values()].map(agg => ({
+      name: agg.entry.name, sampleCode: agg.entry.code, qty: agg.qty, unit: agg.entry.unit || '',
+      note: [...agg.orders].join(', ') + (agg.notes.length ? ' • ' + agg.notes.join('; ') : '')
+    }));
+    try {
+      const created = await createSlip(user, {
+        type: 'out', warehouse: session.warehouse || '', exportType: DEDUCT_CATEGORY,
+        note: `Tự động trừ kho khi chốt phiên đối soát ${session.code}`, lines
+      }, { system: true });
+      summary.slipCode = created.code;
+      for (const code of markable) {
+        state.deductedOrders[code] = { at: nowText(), sessionCode: session.code, slipCode: created.code };
+        summary.deducted++;
+      }
+      await persistDeductedOrders();
+    } catch (e) {
+      // Không tạo được phiếu trừ: không đánh dấu đơn nào; đẩy các đơn đã khớp vào hàng chờ để ADMIN xử lí tay
+      for (const code of markable) pushReview(code, '(toàn đơn)', 'lỗi tạo phiếu trừ kho: ' + (e.message || 'không rõ'));
+    }
+  }
+  if (summary.reviewLines) await persistDeductReview();
+  return summary;
+}
+
 /* ================= v33: GIÁM SÁT ADMIN — helper dùng chung ================= */
 const round3 = n => Math.round(n * 1000) / 1000;
 function addDaysKey(key, n) {
@@ -783,9 +997,21 @@ async function loadCache(followPointer) {
   if (settings.arrival_confirmations) {
     try { const j = JSON.parse(settings.arrival_confirmations); if (j && typeof j === 'object' && !Array.isArray(j)) state.arrivalConfirmations = j; } catch {}
   }
+  state.deductedOrders = {};
+  if (settings.deducted_orders) {
+    try { const j = JSON.parse(settings.deducted_orders); if (j && typeof j === 'object' && !Array.isArray(j)) state.deductedOrders = j; } catch {}
+  }
+  state.deductReview = [];
+  if (settings.deduct_review) {
+    try { const arr = JSON.parse(settings.deduct_review); if (Array.isArray(arr)) state.deductReview = arr.filter(x => x && x.id && x.orderCode); } catch {}
+  }
   // ĐƠN_POS_ẨN → danh sách đơn POS kỳ vọng cho đối soát, nhóm theo ngày của cột "Cập nhật lúc".
   // Dữ liệu đổ từ POS có thể lệch 1 cột so với header nên tra theo TÊN cột + dự phòng quét ô ngày giờ ở cuối dòng.
   state.posOrders = parsePosOrders(tables['ĐƠN_POS_ẨN'] || []);
+  // v39: chi tiết đơn POS (sản phẩm text + trạng thái) — nguồn DUY NHẤT cho "Bán hôm nay" và tự trừ kho
+  const pod = parsePosOrderDetails(tables['ĐƠN_POS_ẨN'] || []);
+  state.posOrderRows = pod.rows;
+  state.posOrderById = pod.byId;
   let pendingSlips = [];
   if (settings.pending_slips) {
     try { const arr = JSON.parse(settings.pending_slips); if (Array.isArray(arr)) pendingSlips = arr.filter(s => s && s.code && Array.isArray(s.rows)); } catch {}
@@ -1027,12 +1253,14 @@ function productLabel(l, item) {
   const variant = l.variant || (item ? item.variant : '');
   return variant ? `${name} (${variant})` : name;
 }
-async function createSlip(user, body) {
+async function createSlip(user, body, opts = {}) {
   requireWritable();
   const type = body.type;
   if (!PREFIX[type]) throw new Error('Loại phiếu không hợp lệ.');
   const permMap = { in: 'inbound', out: 'outbound', check: 'stocktake', process: 'processing', recon: 'recon' };
-  if (!isAdmin(user) && !permsOf(user)[permMap[type]]) throw new Error('Tài khoản của bạn không có quyền tạo phiếu này.');
+  // opts.system: phiếu do HỆ THỐNG tự tạo (v39 — phiếu xuất trừ kho khi chốt đối soát): là hệ quả
+  // của chính phiên đối soát người dùng đã có quyền chốt, nên không đòi thêm quyền của loại phiếu đích.
+  if (!opts.system && !isAdmin(user) && !permsOf(user)[permMap[type]]) throw new Error('Tài khoản của bạn không có quyền tạo phiếu này.');
   const linesIn = Array.isArray(body.lines) ? body.lines : [];
   if (!linesIn.length) throw new Error('Chưa có sản phẩm/dòng nào trong phiếu.');
   const code = slipCode(PREFIX[type]);
@@ -1215,6 +1443,8 @@ async function api(req, res, url) {
     if (wh) items = items.filter(i => (i.warehouse || '').includes(wh));
     if (q) items = items.filter(i => (i.name + ' ' + i.code).toLowerCase().includes(q));
     items.sort((a, b) => a.name.localeCompare(b.name, 'vi'));
+    // v39: số đã bán hôm nay chưa trừ kho theo TÊN sản phẩm — chỉ bản KHÔNG mù mới kèm số
+    const undMap = blind ? null : soldUndeductedByName();
     const out = items.map(e => {
       // Liên kết ngược về POS: ưu tiên khớp cả MÃ + TÊN (cùng mã khác tên là 2 sản phẩm khác nhau),
       // rồi mới tới mã + kho, cuối cùng là mã thuần như trước.
@@ -1231,9 +1461,17 @@ async function api(req, res, url) {
         sku: codes.sku, sampleCode: codes.sampleCode,
         category: pos ? pos.category : '', posKey: pos ? pos.key : ''
       };
-      return blind ? base : { ...base, totalIn: e.totalIn, totalOut: e.totalOut, processIn: e.processIn, balance: e.stock, lastInAt: e.lastInAt };
+      if (blind) return base;
+      const und = undMap.get(normProdName(e.name)) || 0;
+      return { ...base, totalIn: e.totalIn, totalOut: e.totalOut, processIn: e.processIn, balance: e.stock, lastInAt: e.lastInAt, soldTodayUndeducted: und, actualStock: round3(e.stock - und) };
     });
     return send(res, 200, { items: out });
+  }
+
+  /* v39: "Bán hôm nay" — tổng hợp đơn POS hôm nay từ tab ĐƠN_POS_ẨN (đã khớp sản phẩm kho).
+     Mọi tài khoản đã đăng nhập đều xem được: đây là số hàng của KHO CỬA HÀNG, không phải số POS. */
+  if (p === '/api/sales-today' && method === 'GET') {
+    return send(res, 200, salesTodayData());
   }
 
   if (p === '/api/inventory') {
@@ -1255,9 +1493,12 @@ async function api(req, res, url) {
     const page = Math.max(1, parseInt(url.searchParams.get('page') || '1'));
     const size = 100;
     // v35 (chỉ hiển thị): kèm Mã SP + Mã mẫu tra từ POS cho từng dòng sổ kho (không đổi số liệu).
+    // v39: kèm "Tồn thực tế" = Tồn sổ − số đã bán hôm nay (đơn POS đã giao) chưa trừ qua đối soát.
+    const undMap = soldUndeductedByName();
     const paged = items.slice((page - 1) * size, page * size).map(e => {
       const codes = resolveProdCodes(e.code, e.name, e.warehouse);
-      return { ...e, sku: codes.sku, sampleCode: codes.sampleCode };
+      const und = undMap.get(normProdName(e.name)) || 0;
+      return { ...e, sku: codes.sku, sampleCode: codes.sampleCode, soldTodayUndeducted: und, actualStock: round3(e.stock - und) };
     });
     // warehouseStock = tổng hợp TOÀN BỘ kho bằng đúng hàm warehouseSummary như bootstrap —
     // client dùng nó cập nhật chip "Tồn kho" trên thanh đầu để chip/tóm tắt/bảng không bao giờ lệch nhau.
@@ -1325,7 +1566,20 @@ async function api(req, res, url) {
 
   if (p === '/api/slips' && method === 'POST') {
     const body = await readBody(req);
-    try { const slip = await createSlip(user, body); return send(res, 200, { slip }); }
+    try {
+      const slip = await createSlip(user, body);
+      const out = { slip };
+      // v39: chốt phiên ĐỐI SOÁT -> tự trừ kho cho các đơn đã quét (xem processReconDeduction).
+      // Lỗi ở bước trừ kho KHÔNG làm hỏng việc chốt phiên: trả kèm tóm tắt/lỗi để client báo lại.
+      if (body.type === 'recon') {
+        const internal = state.slips.find(s => s.type === 'recon' && s.code === slip.code);
+        if (internal) {
+          try { out.deduction = await processReconDeduction(user, internal); }
+          catch (e) { out.deduction = { error: e.message || 'Không trừ kho tự động được.' }; }
+        }
+      }
+      return send(res, 200, out);
+    }
     catch (e) { return send(res, e.message === READONLY_MSG ? 403 : 400, { error: e.message }); }
   }
   if (p === '/api/history') {
@@ -1494,7 +1748,20 @@ async function api(req, res, url) {
       if (d >= per.to) break;
     }
     days.reverse();
-    return send(res, 200, { period: per, days });
+    // v39: hàng chờ "dòng bán chưa trừ được" — danh sách sống (không theo kỳ), mới nhất lên đầu
+    return send(res, 200, { period: per, days, review: [...state.deductReview].reverse() });
+  }
+
+  /* v39: ADMIN đóng 1 dòng trong hàng chờ "dòng bán chưa trừ được" sau khi đã xử lí tay */
+  if (p === '/api/deduct-review-dismiss' && method === 'POST') {
+    if (!needAdmin(req, res)) return;
+    const b = await readBody(req);
+    const id = String(b.id || '');
+    const before = state.deductReview.length;
+    state.deductReview = state.deductReview.filter(x => x.id !== id);
+    if (state.deductReview.length === before) return send(res, 404, { error: 'Không tìm thấy dòng chờ xử lí.' });
+    await persistDeductReview();
+    return send(res, 200, { ok: true, review: [...state.deductReview].reverse() });
   }
 
   if (p === '/api/admin/checks' && method === 'GET') {
