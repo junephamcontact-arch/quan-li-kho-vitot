@@ -153,7 +153,7 @@ async function gvizRows(sheetId, tab) {
 }
 
 /* ---------------- Trạng thái / bộ nhớ đệm ---------------- */
-const MODULES = ['dashboard', 'inventory', 'inbound', 'outbound', 'stocktake', 'processing', 'recon', 'history', 'calendar'];
+const MODULES = ['dashboard', 'inventory', 'inbound', 'outbound', 'stocktake', 'processing', 'recon', 'history', 'calendar', 'calendar_manage'];
 function systemRoles() {
   const all = {}; MODULES.forEach(m => all[m] = true);
   const staff = { inventory: true, inbound: true, outbound: true, stocktake: true, processing: true, recon: true, history: true, dashboard: false, calendar: true };
@@ -177,6 +177,7 @@ const state = {
   calendarEvents: [],   // sự kiện lịch kiểu Google Calendar (APP_CAI_DAT: calendar_events)
   posOrders: [],        // đơn POS kỳ vọng đối soát, đọc từ tab ĐƠN_POS_ẨN: {dateKey, orderId}
   discrepancyStatus: {}, // trạng thái xử lí chênh lệch (APP_CAI_DAT: discrepancy_status): id -> {status, note, by, at}
+  arrivalConfirmations: {}, // xác nhận nhận hàng (APP_CAI_DAT: arrival_confirmations): mã phiếu nhập -> {history: [{action:'confirm'|'unconfirm', by, at, note?, shortage?}]}
   settingsRows: {},     // APP_CAI_DAT: key -> số dòng
   ipLock: { enabled: false, allow: [] },
   defaultWarehouse: '', // Kho mặc định (APP_CAI_DAT: default_warehouse)
@@ -778,6 +779,10 @@ async function loadCache(followPointer) {
   if (settings.discrepancy_status) {
     try { const j = JSON.parse(settings.discrepancy_status); if (j && typeof j === 'object' && !Array.isArray(j)) state.discrepancyStatus = j; } catch {}
   }
+  state.arrivalConfirmations = {};
+  if (settings.arrival_confirmations) {
+    try { const j = JSON.parse(settings.arrival_confirmations); if (j && typeof j === 'object' && !Array.isArray(j)) state.arrivalConfirmations = j; } catch {}
+  }
   // ĐƠN_POS_ẨN → danh sách đơn POS kỳ vọng cho đối soát, nhóm theo ngày của cột "Cập nhật lúc".
   // Dữ liệu đổ từ POS có thể lệch 1 cột so với header nên tra theo TÊN cột + dự phòng quét ô ngày giờ ở cuối dòng.
   state.posOrders = parsePosOrders(tables['ĐƠN_POS_ẨN'] || []);
@@ -965,12 +970,32 @@ function needAdmin(req, res) {
   return u;
 }
 
+/* ---------------- Xác nhận nhận hàng trên Lịch (v36) ----------------
+   Phiếu nhập có "Ngày về dự kiến" hiện trên Lịch dưới dạng "Hàng về". Nhân viên nhận hàng
+   thật thì xác nhận → phiếu biến khỏi Lịch. Lịch sử xác nhận lưu ở APP_CAI_DAT
+   (arrival_confirmations): mã phiếu -> { history: [...] }; trạng thái = sự kiện cuối. */
+function arrivalInfo(slip) {
+  if (!slip || slip.type !== 'in' || !slip.expectedKey) return null;
+  const rec = state.arrivalConfirmations[slip.code];
+  const hist = rec && Array.isArray(rec.history) ? rec.history : [];
+  const last = hist[hist.length - 1];
+  const confirmed = !!last && last.action === 'confirm';
+  const tk = todayKey();
+  const overdueDays = !confirmed && slip.expectedKey < tk ? daysBetween(slip.expectedKey, tk) : 0;
+  const info = { confirmed, overdueDays };
+  if (confirmed) { info.by = last.by || ''; info.at = last.at || ''; info.note = last.note || ''; info.shortage = !!last.shortage; }
+  return info;
+}
+async function persistArrivalConfirmations() { await setSetting('arrival_confirmations', JSON.stringify(state.arrivalConfirmations)); }
+
 /* ---------------- Tạo phiếu → ghi xuống Sheet ---------------- */
 const PREFIX = { in: 'NH', out: 'XH', check: 'KK', process: 'CB', recon: 'DS' };
 function stripBlind(slip, viewer) {
   const copy = JSON.parse(JSON.stringify(slip));
   delete copy.rowRefs;
   delete copy.rows;
+  // v36: trạng thái xác nhận nhận hàng (Lịch) cho phiếu nhập có ngày về dự kiến
+  if (copy.type === 'in' && copy.expectedKey) copy.arrival = arrivalInfo(copy);
   if (!isAdmin(viewer)) {
     if (copy.type === 'check') for (const l of copy.lines || []) { delete l.systemStock; delete l.variance; delete l.matchStatus; }
     if (copy.type === 'recon') for (const l of copy.lines || []) delete l.warning;
@@ -1398,6 +1423,29 @@ async function api(req, res, url) {
         if (!md || daysBetween(md, tk) >= 5) alerts.push({ severity: 'yellow', target: 'goods', text: `Tồn đọng: ${e.name} còn ${e.stock} ${e.unit || ''} tại ${e.warehouse || 'kho cửa hàng'} — biến động gần nhất ${md || 'không rõ'} (≥5 ngày chưa xuất).` });
       }
     }
+    {
+      // v36: Hàng về QUÁ HẠN chưa xác nhận nhận hàng (Lịch) — 1 dòng gộp, chỉ phiếu lâu nhất
+      const tk = todayKey();
+      const overdueArr = state.slips
+        .filter(s => s.type === 'in' && s.expectedKey && s.expectedKey < tk)
+        .map(s => ({ s, info: arrivalInfo(s) }))
+        .filter(x => x.info && !x.info.confirmed)
+        .sort((a, b) => a.s.expectedKey.localeCompare(b.s.expectedKey));
+      if (overdueArr.length) {
+        const o = overdueArr[0];
+        alerts.push({ severity: 'red', target: 'calendar', text: `Hàng về QUÁ HẠN chưa xác nhận nhận: ${overdueArr.length} phiếu nhập — lâu nhất phiếu ${o.s.code} (dự kiến về ${o.s.expectedKey}, đã quá ${o.info.overdueDays} ngày). Vào Lịch để kiểm tra.` });
+      }
+      // v36: Xác nhận nhận THIẾU / hàng hỏng trong 7 ngày gần nhất — mỗi phiếu 1 dòng
+      const from7 = addDaysKey(tk, -6);
+      for (const s of state.slips) {
+        if (s.type !== 'in' || !s.expectedKey) continue;
+        const info = arrivalInfo(s);
+        if (!info || !info.confirmed || !info.shortage) continue;
+        const d = String(info.at || '').slice(0, 10);
+        if (d < from7 || d > tk) continue;
+        alerts.push({ severity: 'yellow', target: 'history', text: `Nhận hàng THIẾU / HỎNG: phiếu ${s.code} — ${info.by} xác nhận lúc ${info.at}${info.note ? ' — ghi chú: ' + info.note : ''}.` });
+      }
+    }
     return send(res, 200, { period: { from, to }, prevPeriod: prev, kpis, alerts });
   }
 
@@ -1583,16 +1631,19 @@ async function api(req, res, url) {
     if (!permsOf(user).calendar && !isAdmin(user)) return send(res, 403, { error: 'Không có quyền xem lịch.' });
     const from = url.searchParams.get('from') || '';
     const to = url.searchParams.get('to') || '';
+    const canManage = !!permsOf(user).calendar_manage; // v36: quyền "Quản lí lịch" (ADMIN luôn có)
     const arrivals = state.slips.filter(s => s.type === 'in' && s.expectedKey)
       .filter(s => (!from || s.expectedKey >= from) && (!to || s.expectedKey <= to))
-      .map(s => ({ slipId: s.id, code: s.code, date: s.expectedKey, warehouse: s.warehouse || '', supplier: s.supplier || '', creatorName: s.creatorName || '', lines: (s.lines || []).map(l => ({ name: l.name, qty: l.qty, unit: l.unit })) }));
+      .map(s => ({ s, info: arrivalInfo(s) }))
+      .filter(x => !(x.info && x.info.confirmed)) // v36: đã xác nhận nhận hàng → không hiện trên Lịch nữa
+      .map(({ s, info }) => ({ slipId: s.id, code: s.code, date: s.expectedKey, warehouse: s.warehouse || '', supplier: s.supplier || '', creatorName: s.creatorName || '', overdueDays: info ? info.overdueDays : 0, lines: (s.lines || []).map(l => ({ name: l.name, qty: l.qty, unit: l.unit })) }));
     const events = state.calendarEvents
       .filter(e => (!from || e.date >= from) && (!to || e.date <= to))
-      .map(e => ({ ...e, canEdit: isAdmin(user) || e.creatorId === user.id }));
-    return send(res, 200, { arrivals, events });
+      .map(e => ({ ...e, canEdit: canManage }));
+    return send(res, 200, { arrivals, events, canManage });
   }
   if (p === '/api/calendar-events' && method === 'POST') {
-    if (!permsOf(user).calendar && !isAdmin(user)) return send(res, 403, { error: 'Không có quyền thêm sự kiện.' });
+    if (!permsOf(user).calendar_manage) return send(res, 403, { error: 'Không có quyền quản lí lịch: chỉ ADMIN hoặc tài khoản được cấp quyền "Quản lí lịch" mới thêm được sự kiện.' });
     const b = await readBody(req);
     const title = String(b.title || '').trim();
     const date = String(b.date || '').trim();
@@ -1607,7 +1658,7 @@ async function api(req, res, url) {
   if (evMatch) {
     const ev = state.calendarEvents.find(x => x.id === decodeURIComponent(evMatch[1]));
     if (!ev) return send(res, 404, { error: 'Không tìm thấy sự kiện.' });
-    if (!isAdmin(user) && ev.creatorId !== user.id) return send(res, 403, { error: 'Chỉ người tạo sự kiện hoặc ADMIN mới sửa/xoá được sự kiện này.' });
+    if (!permsOf(user).calendar_manage) return send(res, 403, { error: 'Không có quyền quản lí lịch: chỉ ADMIN hoặc tài khoản được cấp quyền "Quản lí lịch" mới sửa/xoá được sự kiện.' });
     if (method === 'PUT') {
       const b = await readBody(req);
       const title = String(b.title || '').trim();
@@ -1623,6 +1674,35 @@ async function api(req, res, url) {
       try { await persistCalendarEvents(); } catch (e) { return send(res, 400, { error: e.message }); }
       return send(res, 200, { ok: true });
     }
+  }
+
+  /* ---- Xác nhận nhận hàng (v36): nhân viên nhận hàng thật xác nhận trên Lịch;
+     ADMIN huỷ xác nhận khi bấm nhầm. Lịch sử lưu APP_CAI_DAT arrival_confirmations. ---- */
+  if (p === '/api/arrivals/confirm' && method === 'POST') {
+    const b = await readBody(req);
+    const code = String(b.code || '').trim();
+    const slip = state.slips.find(s => s.code === code && s.type === 'in');
+    if (!slip) return send(res, 404, { error: 'Không tìm thấy phiếu nhập' + (code ? ' ' + code : '') + '.' });
+    if (!slip.expectedKey) return send(res, 400, { error: 'Phiếu này không có "Ngày về dự kiến" nên không cần xác nhận nhận hàng trên Lịch.' });
+    const info = arrivalInfo(slip);
+    if (info && info.confirmed) return send(res, 400, { error: `Phiếu ${code} đã được ${info.by} xác nhận nhận hàng lúc ${info.at} rồi.` });
+    const rec = state.arrivalConfirmations[code] && Array.isArray(state.arrivalConfirmations[code].history) ? state.arrivalConfirmations[code] : { history: [] };
+    rec.history.push({ action: 'confirm', by: user.name, at: nowText(), note: String(b.note || '').slice(0, 500), shortage: !!b.shortage });
+    state.arrivalConfirmations[code] = rec;
+    try { await persistArrivalConfirmations(); } catch (e) { /* chỉ đọc: giữ trong bộ nhớ */ }
+    return send(res, 200, { ok: true, arrival: arrivalInfo(slip) });
+  }
+  if (p === '/api/arrivals/unconfirm' && method === 'POST') {
+    if (!needAdmin(req, res)) return;
+    const b = await readBody(req);
+    const code = String(b.code || '').trim();
+    const slip = state.slips.find(s => s.code === code && s.type === 'in');
+    if (!slip) return send(res, 404, { error: 'Không tìm thấy phiếu nhập' + (code ? ' ' + code : '') + '.' });
+    const info = arrivalInfo(slip);
+    if (!info || !info.confirmed) return send(res, 400, { error: `Phiếu ${code} chưa được xác nhận nhận hàng nên không huỷ xác nhận được.` });
+    state.arrivalConfirmations[code].history.push({ action: 'unconfirm', by: user.name, at: nowText() });
+    try { await persistArrivalConfirmations(); } catch (e) { /* chỉ đọc: giữ trong bộ nhớ */ }
+    return send(res, 200, { ok: true, arrival: arrivalInfo(slip) });
   }
 
   if (p === '/api/profile' && method === 'POST') {
