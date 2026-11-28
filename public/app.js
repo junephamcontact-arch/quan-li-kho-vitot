@@ -1,5 +1,5 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v43.281126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v44.281126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -272,6 +272,16 @@ const ADMIN_VIEWS = {}; // bản GIÁM SÁT của Kiểm kho / Chế biến / Đ
 
 /* ---------- Dùng chung cho các màn giám sát ADMIN (v33) ---------- */
 const normName = s => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+/* Bỏ dấu tiếng Việt + thường hoá — để ô tìm kiếm không phân biệt dấu (v44) */
+function normSearchText(s) {
+  return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').replace(/Đ/g, 'D').toLowerCase().trim().replace(/\s+/g, ' ');
+}
+/* Lọc danh sách sản phẩm theo ô tìm: khớp tên / Mã SP (sku) / Mã mẫu (sampleCode), không phân biệt dấu (v44) */
+function goodsFilterRows(rows, q) {
+  const nq = normSearchText(q);
+  if (!nq) return rows;
+  return rows.filter(r => normSearchText(r.name).includes(nq) || normSearchText(r.sku).includes(nq) || normSearchText(r.sampleCode).includes(nq));
+}
 function monRange() {
   const tk = bkkKey(0);
   switch (S.monPreset) {
@@ -369,11 +379,19 @@ function slipDetailHTML(s) {
   } else if (s.type === 'process') {
     tbl = `<table class="tbl"><tr><th>Mã SP</th><th>Mã mẫu</th><th>Nguyên liệu</th><th>Đầu vào</th><th>Thành phẩm</th><th>Bán được</th><th>Hủy</th><th>Hao hụt</th></tr>${(s.lines || []).map(l => `<tr><td>${esc(l.sku || '') || '—'}</td><td>${esc(l.sampleCode || '') || '—'}</td><td>${esc(l.name)}</td><td>${l.inputQty}</td><td>${esc(l.finishedName || '')}${l.posQty ? ` (${l.posQty})` : ''}</td><td>${l.usable} (${l.usablePct}%)</td><td>${l.discard} (${l.discardPct}%)</td><td>${l.loss} (${l.lossPct}%)</td></tr>`).join('')}</table>`;
   } else if (s.type === 'recon') {
-    tbl = `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${(s.lines || []).map(l => `<span class="recon-chip"><b>${esc(l.code)}</b></span>`).join('') || '<span class="mut">Không có mã nào.</span>'}</div><div class="mut" style="margin-top:6px">Tổng: ${(s.lines || []).length} mã quét</div>` + reconDeductionHTML(s);
+    tbl = reconLinesTableHTML(s) + `<div class="mut" style="margin-top:6px">Tổng: ${(s.lines || []).length} mã quét</div>` + reconDeductionHTML(s);
   } else {
     tbl = `<table class="tbl"><tr><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>Số lượng</th><th>ĐVT</th><th>Ghi chú</th></tr>${(s.lines || []).map(l => `<tr><td>${esc(l.sku || '') || '—'}</td><td>${esc(l.sampleCode || '') || '—'}</td><td>${esc(l.name)}</td><td>${l.qty}</td><td>${esc(l.unit || '')}</td><td>${esc(l.note || '')}</td></tr>`).join('')}</table>`;
   }
   return head + tbl;
+}
+/* Bảng mã quét của 1 phiên ĐỐI SOÁT (v44): STT | Mã đơn | Nguồn đơn (POS) | Sản phẩm (POS) —
+   dùng chung Lịch sử mở rộng + modal chi tiết phiếu. source/productsText do server gắn khi
+   tra cứu ĐƠN_POS_ẨN; đơn không có trong tab POS → "—". */
+function reconLinesTableHTML(s) {
+  const lines = s.lines || [];
+  if (!lines.length) return '<p class="mut" style="margin-top:6px">Không có mã nào.</p>';
+  return `<div style="overflow-x:auto"><table class="tbl" style="margin-top:6px"><tr><th>STT</th><th>Mã đơn</th><th>Nguồn đơn (POS)</th><th>Sản phẩm (POS)</th></tr>${lines.map((l, i) => `<tr><td>${i + 1}</td><td><b>${esc(l.code)}</b></td><td>${esc(l.source || '') || '—'}</td><td>${esc(l.productsText || '') || '—'}</td></tr>`).join('')}</table></div>`;
 }
 /* Khối "Hàng đã xuất theo phiên này" (v41): dùng chung modal chi tiết phiếu + Lịch sử mở rộng
    cho phiếu ĐỐI SOÁT — dữ liệu từ s.deduction do server gắn (phiếu xuất trừ kho của phiên +
@@ -617,7 +635,10 @@ VIEWS.activity = async () => {
 VIEWS.goods = async () => {
   const v = $('#view'); v.className = 'view';
   v.innerHTML = `<div class="card">
-    <div class="wh-tabs" id="gTabs"></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <select class="in" id="gWhSel" style="max-width:360px" title="Chọn kho để xem"></select>
+      <input class="in" id="gSearch" placeholder="Tìm theo tên, Mã SP, Mã mẫu…" autocomplete="off" style="flex:1;min-width:200px">
+    </div>
     <div class="mut hidden" id="gPosNote" style="margin:8px 0">Số tồn POS là TỔNG tồn của sản phẩm trên Pancake POS — dữ liệu Sheet hiện chưa tách riêng số tồn cho từng kho.</div>
     <div id="gBody">Đang tải…</div></div>
   <div id="gCard"></div>`;
@@ -628,11 +649,16 @@ VIEWS.goods = async () => {
   const pcMap = new Map(pcRows.map(r => [r.code + '\u0002' + normName(r.name), r]));
   const posWarehouses = [...new Set(S.products.flatMap(p => p.warehouses || []))];
   let tab = 'store';
-  function renderTabs() {
+  let query = '';
+  // v44: chọn kho bằng 1 DROPDOWN (đúng danh sách như các tab chip trước đây, chọn xong tự thu gọn)
+  // + ô TÌM KIẾM lọc trực tiếp trên bảng đang xem (tên / Mã SP / Mã mẫu, không phân biệt dấu).
+  function renderWhSelect() {
     const tabs = [['store', 'Kho cửa hàng'], ...posWarehouses.map(w => ['pos:' + w, w + ' (POS)'])];
-    $('#gTabs').innerHTML = tabs.map(([k, l]) => `<button class="chip ${tab === k ? 'active' : ''}" data-gt="${esc(k)}">${esc(l)}</button>`).join('');
-    $$('#gTabs [data-gt]').forEach(b => b.onclick = () => { tab = b.dataset.gt; renderTabs(); renderBody(); });
+    const sel = $('#gWhSel');
+    sel.innerHTML = tabs.map(([k, l]) => `<option value="${esc(k)}"${tab === k ? ' selected' : ''}>${esc(l)}</option>`).join('');
+    sel.onchange = () => { tab = sel.value; $('#gPosNote').classList.toggle('hidden', tab === 'store'); renderBody(); };
     $('#gPosNote').classList.toggle('hidden', tab === 'store');
+    $('#gSearch').oninput = e => { query = e.target.value; renderBody(); };
   }
   function renderBody() {
     const box = $('#gBody'); if (!box) return;
@@ -653,7 +679,8 @@ VIEWS.goods = async () => {
       });
       for (const [k, pc] of pcMap) if (!groups.has(k)) rows.push({ code: pc.code, name: pc.name, unit: pc.unit || '', warehouse: '', sku: pc.sku || '', sampleCode: pc.sampleCode || '', totalIn: 0, totalOut: 0, balance: 0, pos: pc.posStock, diff: -pc.posStock });
       rows.sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff) || a.name.localeCompare(b.name, 'vi'));
-      box.innerHTML = `<table class="tbl"><tr><th>STT</th><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>Tổng nhập</th><th>Tổng xuất</th><th>Tồn cửa hàng</th><th>Tồn POS</th><th>Chênh lệch</th></tr>${rows.map((r, idx) => `<tr class="clickable" data-gcard="${esc(r.code)}" data-gname="${esc(r.name)}" data-gwh="${esc(r.warehouse || '')}"><td>${idx + 1}</td><td>${esc(r.sku || '') || '—'}</td><td>${esc(r.sampleCode || r.code || '') || '—'}</td><td><b>${esc(r.name)}</b>${r.unit ? `<div class="mut">${esc(r.unit)}</div>` : ''}</td><td>${fmtKg(r.totalIn)}</td><td>${fmtKg(r.totalOut)}</td><td><span class="badge ${r.balance > 0 ? 'g' : r.balance < 0 ? 'r' : 'y'}">${fmtKg(r.balance)}</span></td><td>${fmtKg(r.pos)}</td><td><span class="badge ${r.diff === 0 ? 'g' : 'r'}">${r.diff > 0 ? '+' : ''}${fmtKg(r.diff)}</span></td></tr>`).join('') || '<tr><td colspan="9" class="mut">Chưa có dữ liệu.</td></tr>'}</table>
+      const shown = goodsFilterRows(rows, query);
+      box.innerHTML = `<table class="tbl"><tr><th>STT</th><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>Tổng nhập</th><th>Tổng xuất</th><th>Tồn cửa hàng</th><th>Tồn POS</th><th>Chênh lệch</th></tr>${shown.map((r, idx) => `<tr class="clickable" data-gcard="${esc(r.code)}" data-gname="${esc(r.name)}" data-gwh="${esc(r.warehouse || '')}"><td>${idx + 1}</td><td>${esc(r.sku || '') || '—'}</td><td>${esc(r.sampleCode || r.code || '') || '—'}</td><td><b>${esc(r.name)}</b>${r.unit ? `<div class="mut">${esc(r.unit)}</div>` : ''}</td><td>${fmtKg(r.totalIn)}</td><td>${fmtKg(r.totalOut)}</td><td><span class="badge ${r.balance > 0 ? 'g' : r.balance < 0 ? 'r' : 'y'}">${fmtKg(r.balance)}</span></td><td>${fmtKg(r.pos)}</td><td><span class="badge ${r.diff === 0 ? 'g' : 'r'}">${r.diff > 0 ? '+' : ''}${fmtKg(r.diff)}</span></td></tr>`).join('') || `<tr><td colspan="9" class="mut">${query ? 'Không tìm thấy sản phẩm nào khớp ô tìm.' : 'Chưa có dữ liệu.'}</td></tr>`}</table>
       <div class="mut" style="margin-top:6px">Bấm vào 1 dòng để mở THẺ KHO của sản phẩm.</div>`;
     } else {
       const whName = tab.slice(4);
@@ -672,7 +699,8 @@ VIEWS.goods = async () => {
       // Nhóm gộp nhiều dòng POS: mã chỉ hiện khi cả nhóm có đúng 1 giá trị — nhiều giá trị khác nhau thì "—"
       const singleOf = set => set.size === 1 ? [...set][0] : '';
       const rows = [...groups.values()].map(g => ({ ...g, sku: singleOf(g.skus), sampleCode: singleOf(g.samples) }));
-      box.innerHTML = `<table class="tbl"><tr><th>STT</th><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>ĐVT</th><th>Tồn POS</th><th>Có thể bán</th><th>Kho thao tác</th></tr>${rows.map((r, idx) => `<tr class="clickable" data-gcard="${esc(r.code)}" data-gname="${esc(r.name)}" data-gwh=""><td>${idx + 1}</td><td>${esc(r.sku || '') || '—'}</td><td>${esc(r.sampleCode || '') || '—'}</td><td><b>${esc(r.name)}</b></td><td>${esc(r.unit) || '—'}</td><td>${fmtKg(r.stock)}</td><td>${fmtKg(r.sellable)}</td><td class="mut">${[...r.warehouses].filter(w => w !== whName).join(', ') || '—'}</td></tr>`).join('') || '<tr><td colspan="8" class="mut">Không có sản phẩm nào thuộc kho này trên POS.</td></tr>'}</table>`;
+      const shown = goodsFilterRows(rows, query);
+      box.innerHTML = `<table class="tbl"><tr><th>STT</th><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>ĐVT</th><th>Tồn POS</th><th>Có thể bán</th><th>Kho thao tác</th></tr>${shown.map((r, idx) => `<tr class="clickable" data-gcard="${esc(r.code)}" data-gname="${esc(r.name)}" data-gwh=""><td>${idx + 1}</td><td>${esc(r.sku || '') || '—'}</td><td>${esc(r.sampleCode || '') || '—'}</td><td><b>${esc(r.name)}</b></td><td>${esc(r.unit) || '—'}</td><td>${fmtKg(r.stock)}</td><td>${fmtKg(r.sellable)}</td><td class="mut">${[...r.warehouses].filter(w => w !== whName).join(', ') || '—'}</td></tr>`).join('') || `<tr><td colspan="8" class="mut">${query ? 'Không tìm thấy sản phẩm nào khớp ô tìm.' : 'Không có sản phẩm nào thuộc kho này trên POS.'}</td></tr>`}</table>`;
     }
     box.querySelectorAll('[data-gcard]').forEach(tr => tr.onclick = () => openStockCard(tr.dataset.gwh, tr.dataset.gcard, tr.dataset.gname));
   }
@@ -697,7 +725,7 @@ VIEWS.goods = async () => {
       box.scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (err) { box.innerHTML = `<div class="card" style="margin-top:12px">${esc(err.message)}</div>`; }
   }
-  renderTabs(); renderBody();
+  renderWhSelect(); renderBody();
 };
 
 /* ---------- Chế biến — GIÁM SÁT (ADMIN, v33 §5); nhân viên kho vẫn dùng form ở VIEWS.processing ---------- */
@@ -1506,7 +1534,6 @@ VIEWS.history = async () => {
         const blind = l.variance === undefined;
         return `<tr><td>${esc(l.sku || '') || '—'}</td><td>${esc(l.sampleCode || '') || '—'}</td><td>${esc(l.name)}${l.variant ? ' — ' + esc(l.variant) : ''}</td><td>${l.counted}</td>${blind ? '<td></td><td></td>' : `<td>${l.systemStock}</td><td>${l.variance > 0 ? '+' : ''}${l.variance} <span class="pill ${l.variance === 0 ? '' : 'warn'}">${esc(l.matchStatus)}</span></td>`}</tr>`;
       }).join('');
-      else if (s.type === 'recon') detail = s.lines.map((l, i) => `<tr><td>${i + 1}</td><td colspan="3">${esc(l.code)}</td></tr>`).join('');
       else if (s.type === 'process') detail = s.lines.map(l => `<tr><td>${esc(l.sku || '') || '—'}</td><td>${esc(l.sampleCode || '') || '—'}</td><td>${esc(l.name)}</td><td>Vào ${l.inputQty} • Dùng được ${l.usable} (${l.usablePct}%) • Loại bỏ ${l.discard} (${l.discardPct}%) • Hao hụt ${l.loss} (${l.lossPct}%)</td></tr>`).join('');
       else detail = s.lines.map(l => `<tr><td>${esc(l.sku || '') || '—'}</td><td>${esc(l.sampleCode || '') || '—'}</td><td>${esc(l.name)}${l.variant ? ' — ' + esc(l.variant) : ''}</td><td>${l.qty} ${esc(l.unit || '')}${l.note ? ' • ' + esc(l.note) : ''}</td></tr>`).join('');
       const wsLine = s.writeStatus === 'written'
@@ -1523,7 +1550,7 @@ VIEWS.history = async () => {
         <div class="slip-acc-body">
           <div class="mut">Người tạo: ${esc(s.creatorName)}${s.type === 'in' && s.expectedDate ? ` • Ngày về dự kiến: ${esc(s.expectedDate)}` : ''}${s.type === 'out' && s.exportType ? ` • Phân loại: ${esc(s.exportType)}` : ''}</div>
           ${arrivalLineHTML(s)}
-          <table class="tbl" style="margin-top:6px">${s.type === 'check' ? '<tr><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>Đếm thực tế</th><th>Tồn hệ thống</th><th>Chênh lệch</th></tr>' : s.type === 'process' ? '<tr><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>Chi tiết</th></tr>' : s.type === 'recon' ? '' : '<tr><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>Số lượng / Ghi chú</th></tr>'}${detail}</table>
+          ${s.type === 'recon' ? reconLinesTableHTML(s) : `<table class="tbl" style="margin-top:6px">${s.type === 'check' ? '<tr><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>Đếm thực tế</th><th>Tồn hệ thống</th><th>Chênh lệch</th></tr>' : s.type === 'process' ? '<tr><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>Chi tiết</th></tr>' : '<tr><th>Mã SP</th><th>Mã mẫu</th><th>Sản phẩm</th><th>Số lượng / Ghi chú</th></tr>'}${detail}</table>`}
           ${s.type === 'recon' ? reconDeductionHTML(s) : ''}
           ${wsLine}
         </div>
