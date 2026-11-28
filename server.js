@@ -1175,20 +1175,31 @@ function ipLockActive() {
   if (process.env.DISABLE_IP_LOCK === '1') return false;
   return !!(state.ipLock && state.ipLock.enabled);
 }
-const BLOCK_PAGE = `<!DOCTYPE html><html lang="vi"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>VITOT FOOD — Ngoài mạng công ty</title><style>
-body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;background:#f2f4f3;color:#14231a}
-.card{max-width:420px;width:100%;background:#fff;border-radius:24px;box-shadow:0 4px 8px rgba(16,60,35,.06),0 20px 48px rgba(16,60,35,.16);overflow:hidden;text-align:center}
-.head{background:linear-gradient(135deg,#0b2239,#16324f);color:#fff;font-weight:700;letter-spacing:.6px;font-size:13.5px;padding:13px}
-.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#ffc233;box-shadow:0 0 0 3px rgba(255,194,51,.25);margin-right:8px;vertical-align:1px}
-.body{padding:26px 24px 24px}.logo{width:64px;height:64px;border-radius:20px;background:linear-gradient(135deg,#34c759,#0e7a3d);color:#fff;font-size:26px;font-weight:800;display:flex;align-items:center;justify-content:center;margin:0 auto 14px}
-.icon{width:84px;height:84px;border-radius:50%;background:#fdf0e0;color:#f59e0b;box-shadow:0 0 0 7px rgba(245,158,11,.14);font-size:40px;font-weight:800;display:flex;align-items:center;justify-content:center;margin:0 auto 14px}
-h1{font-size:19px;margin:0 0 8px}p{color:#6b7a70;line-height:1.55;margin:0}</style></head>
-<body><div class="card"><div class="head"><span class="dot"></span>VITOT FOOD • THÔNG BÁO</div><div class="body">
-<div class="logo">V</div><div class="icon">!</div>
-<h1>Ứng dụng chỉ hoạt động trong mạng công ty</h1>
-<p>Thiết bị của bạn đang ở ngoài mạng nội bộ của Vitot Food nên không thể truy cập Quản lí kho Vitot.<br><br>Vui lòng kết nối Wi-Fi/mạng tại công ty rồi thử lại. Nếu bạn đang ở công ty mà vẫn thấy thông báo này, hãy báo quản trị viên kiểm tra danh sách IP được phép.</p>
-</div></div></body></html>`;
+/* v43: khoá mạng áp theo VAI TRÒ — chỉ chặn NHÂN VIÊN ngoài mạng công ty; ADMIN mở app từ
+   mọi nơi nên trang đăng nhập + file tĩnh luôn tải được, việc chặn diễn ra ở bước đăng nhập
+   và ở từng lời gọi API. Mọi phản hồi chặn dùng CHUNG một dạng: HTTP 403 + {error, ipBlocked}
+   để client hiển thị thông báo mạng công ty như trước. */
+const IP_BLOCK_MSG = 'Ứng dụng chỉ hoạt động trong mạng công ty. IP hiện tại của bạn không nằm trong danh sách được phép.';
+function sendIpBlocked(res) { return send(res, 403, { error: IP_BLOCK_MSG, ipBlocked: true }); }
+
+/* Chống dò PIN (v43): trang đăng nhập nay mở cho mọi IP nên khoá theo IP nguồn — sai PIN
+   5 lần liên tiếp thì IP đó bị từ chối đăng nhập trong 10 phút (kể cả khi nhập đúng PIN);
+   đăng nhập thành công sẽ xoá bộ đếm của IP đó. */
+const loginFails = new Map(); // ip -> { count, blockedUntil }
+const LOGIN_MAX_FAILS = 5, LOGIN_BLOCK_MS = 10 * 60 * 1000;
+function loginBlocked(ip) {
+  const e = loginFails.get(ip);
+  if (!e || !e.blockedUntil) return false;
+  if (Date.now() < e.blockedUntil) return true;
+  loginFails.delete(ip); // hết thời gian khoá → xoá bộ đếm, cho thử lại từ đầu
+  return false;
+}
+function noteLoginFail(ip) {
+  const e = loginFails.get(ip) || { count: 0, blockedUntil: 0 };
+  e.count += 1;
+  if (e.count >= LOGIN_MAX_FAILS) e.blockedUntil = Date.now() + LOGIN_BLOCK_MS;
+  loginFails.set(ip, e);
+}
 
 /* ---------------- Phiên đăng nhập + phân quyền ---------------- */
 const sessions = new Map(); // token -> staffId
@@ -1449,9 +1460,15 @@ async function api(req, res, url) {
   catch (e) { return send(res, 500, { error: 'Không đọc được Google Sheet: ' + e.message }); }
 
   if (p === '/api/login' && method === 'POST') {
+    const ip = clientIp(req);
+    if (loginBlocked(ip)) return send(res, 429, { error: 'Quá nhiều lần nhập sai PIN. Vui lòng thử lại sau ít phút.' });
     const { pin } = await readBody(req);
     const staff = state.staff.find(s => s.active && pinMatches(s.pin, pin));
-    if (!staff) return send(res, 401, { error: 'Mã PIN không đúng. Vui lòng thử lại.' });
+    if (!staff) { noteLoginFail(ip); return send(res, 401, { error: 'Mã PIN không đúng. Vui lòng thử lại.' }); }
+    loginFails.delete(ip); // PIN đúng → xoá bộ đếm lần sai của IP này
+    // Khoá mạng công ty (v43): chỉ áp cho NHÂN VIÊN — PIN đúng nhưng IP ngoài danh sách thì
+    // KHÔNG tạo phiên, trả phản hồi chặn mạng công ty. ADMIN không bị áp dụng.
+    if (!isAdmin(staff) && ipLockActive() && !ipAllowed(ip, state.ipLock.allow)) return sendIpBlocked(res);
     const token = crypto.randomBytes(24).toString('hex');
     sessions.set(token, staff.id);
     return send(res, 200, { token, user: publicUser(staff) });
@@ -2090,8 +2107,11 @@ async function api(req, res, url) {
       const b = await readBody(req);
       const allow = Array.isArray(b.allow) ? [...new Set(b.allow.map(x => String(x).trim()).filter(Boolean))] : (state.ipLock.allow || []);
       const enabled = typeof b.enabled === 'boolean' ? b.enabled : !!state.ipLock.enabled;
-      if (enabled && !ipAllowed(clientIp(req), allow)) {
-        return send(res, 400, { error: `Không thể bật: IP hiện tại của bạn (${clientIp(req)}) chưa có trong danh sách được phép. Hãy bấm "Dùng IP hiện tại của tôi" để thêm vào trước, nếu không bạn sẽ tự khoá mình ở ngoài.` });
+      // v43: ADMIN được miễn khoá mạng nên không còn điều kiện "IP của bạn phải có trong danh
+      // sách". Chỉ chặn 1 trường hợp nguy hiểm: bật khoá khi danh sách TRỐNG → mọi nhân viên
+      // đều bị chặn ngoài.
+      if (enabled && !allow.length) {
+        return send(res, 400, { error: 'Không thể bật khoá mạng khi danh sách IP được phép đang trống — mọi nhân viên sẽ bị chặn ngoài. Hãy thêm ít nhất 1 IP (ví dụ IP mạng công ty) rồi mới bật.' });
       }
       state.ipLock = { enabled, allow };
       try { await setSetting('ip_lock', JSON.stringify(state.ipLock)); } catch (e) { /* chỉ đọc: giữ trong bộ nhớ */ }
@@ -2318,10 +2338,16 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   // Nạp cài đặt (gồm khoá IP) từ Sheet trước khi kiểm tra — lỗi đọc Sheet thì dùng giá trị đã biết/mặc định tắt
   try { await ensureCache(); } catch {}
-  if (ipLockActive() && !ipAllowed(clientIp(req), state.ipLock.allow)) {
-    if (url.pathname.startsWith('/api/')) return send(res, 403, { error: 'Ứng dụng chỉ hoạt động trong mạng công ty. IP hiện tại của bạn không nằm trong danh sách được phép.' });
-    res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
-    return res.end(BLOCK_PAGE);
+  // Khoá mạng công ty (v43 — theo VAI TRÒ): file tĩnh + trang đăng nhập mở cho MỌI IP (để ADMIN
+  // đăng nhập từ xa). Khi khoá đang bật và IP ngoài danh sách: lời gọi API (trừ POST /api/login)
+  // chỉ đi qua nếu phiên thuộc ADMIN; NHÂN VIÊN bị chặn ngay tại đây, kể cả phiên đã đăng nhập
+  // từ trước nhưng IP hiện tại không còn trong danh sách.
+  if (ipLockActive() && !ipAllowed(clientIp(req), state.ipLock.allow) && url.pathname.startsWith('/api/')) {
+    const isLogin = url.pathname === '/api/login' && req.method === 'POST';
+    if (!isLogin) {
+      const u = auth(req);
+      if (!u || !isAdmin(u)) return sendIpBlocked(res);
+    }
   }
   if (url.pathname.startsWith('/api/')) { try { await api(req, res, url); } catch (e) { send(res, 500, { error: 'Lỗi máy chủ: ' + e.message }); } return; }
   let file = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
