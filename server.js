@@ -47,6 +47,20 @@ function parseDateKey(s) {
   if (m) return `${m[1]}-${String(Number(m[2]) + 1).padStart(2, '0')}-${m[3].padStart(2, '0')}`;
   return '';
 }
+/* v44: ô thời gian đọc ngược từ Sheet đôi khi là SỐ SERIAL ngày giờ của Sheets (vd 46353.74712
+   hoặc "46353,74712") thay vì chuỗi ngày giờ — Sheets lưu datetime dạng số, epoch 1899-12-30.
+   Quy về "YYYY-MM-DD HH:mm", lấy nguyên phần ngày/giờ của serial (giờ địa phương Asia/Bangkok
+   mà người dùng đã thấy khi ghi). CHỈ dùng ở đường ĐỌC (buildSlips) để hiển thị — không sửa
+   dữ liệu đã lưu. Nhận diện: số, hoặc chuỗi số có đúng 5 chữ số phần nguyên + phần thập phân tuỳ ý. */
+function sheetsSerialToText(v) {
+  let n = NaN;
+  if (typeof v === 'number') n = v;
+  else if (typeof v === 'string' && /^\d{5}([.,]\d+)?$/.test(v.trim())) n = Number(v.trim().replace(',', '.'));
+  if (!isFinite(n) || n < 10000 || n >= 100000) return '';
+  const d = new Date(Date.UTC(1899, 11, 30) + Math.round(n * 86400000));
+  const p = x => String(x).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
 
 /* ---------------- HTTP thuần (http/https) ---------------- */
 function httpRequest(urlStr, { method = 'GET', headers = {}, body = null } = {}) {
@@ -250,7 +264,12 @@ function splitWarehouses(items) {
 }
 function buildSlips(tables) {
   const slips = [];
-  const push = (s) => { s.id = `${s.type}:${s.code}:${s.rowRefs.length ? s.rowRefs[0].row : slips.length}`; slips.push(s); };
+  const push = (s) => {
+    // v44: thời gian phiếu đọc ngược từ Sheet có thể là serial Sheets → chuẩn hoá để hiển thị
+    const st = sheetsSerialToText(s.createdAt);
+    if (st) { s.createdAt = st; if (!s.dateKey) s.dateKey = parseDateKey(st); }
+    s.id = `${s.type}:${s.code}:${s.rowRefs.length ? s.rowRefs[0].row : slips.length}`; slips.push(s);
+  };
   /* Dòng gõ TAY thẳng trong Sheet (cột Mã phiếu để trống) vẫn là dữ liệu thật của kho — các tab phiếu
      là nguồn sự thật duy nhất nên dòng tay cũng phải tính vào sổ kho/tổng hợp như phiếu app tạo.
      Chỉ nhận dòng có SẢN PHẨM + SỐ LƯỢNG (đúng cột của từng tab); dòng trống/thiếu số lượng thì bỏ qua.
@@ -1318,8 +1337,17 @@ function stripBlind(slip, viewer) {
       l.sku = set && set.size === 1 ? [...set][0] : '';
     }
   }
-  // v41: phiếu ĐỐI SOÁT kèm deduction (phiếu xuất trừ kho của phiên + dòng chưa trừ được)
-  if (copy.type === 'recon') copy.deduction = reconDeductionOf(copy, skuByKey, canon);
+  if (copy.type === 'recon') {
+    // v44: mỗi mã quét kèm Nguồn đơn + Sản phẩm (POS) tra từ ĐƠN_POS_ẨN (cùng bản ghi v40 dùng
+    // để điền cột F/G khi ghi Sheet) — client hiển thị dạng bảng; đơn không có trong tab → trống.
+    for (const l of copy.lines || []) {
+      const rec = state.posOrderById.get(String(l.code || '').trim());
+      l.source = rec ? (rec.source || '') : '';
+      l.productsText = rec ? (rec.productsText || '') : '';
+    }
+    // v41: phiếu ĐỐI SOÁT kèm deduction (phiếu xuất trừ kho của phiên + dòng chưa trừ được)
+    copy.deduction = reconDeductionOf(copy, skuByKey, canon);
+  }
   return copy;
 }
 function productLabel(l, item) {
