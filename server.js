@@ -2361,7 +2361,7 @@ async function api(req, res, url) {
 }
 
 /* ---------------- Static + khởi động ---------------- */
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json' };
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   // Nạp cài đặt (gồm khoá IP) từ Sheet trước khi kiểm tra — lỗi đọc Sheet thì dùng giá trị đã biết/mặc định tắt
