@@ -134,6 +134,12 @@ async function apiValuesAppend(sheetId, tab, rows) {
   const j = await sheetsApi('POST', `/v4/spreadsheets/${sheetId}/values/${encRange(tab)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, { values: rows });
   return j.updates || {};
 }
+/* Ghi RAW: giữ nguyên chuỗi (dùng cho nhật ký đăng nhập — mốc thời gian phải đọc lại đúng
+   từng ký tự, không để Sheets tự diễn giải thành số serial ngày giờ). */
+async function apiValuesAppendRaw(sheetId, tab, rows) {
+  const j = await sheetsApi('POST', `/v4/spreadsheets/${sheetId}/values/${encRange(tab)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, { values: rows });
+  return j.updates || {};
+}
 async function apiValuesUpdate(sheetId, tab, a1, values, raw) {
   return sheetsApi('PUT', `/v4/spreadsheets/${sheetId}/values/${encRange(tab, a1)}?valueInputOption=${raw ? 'RAW' : 'USER_ENTERED'}`, { values });
 }
@@ -177,6 +183,10 @@ function systemRoles() {
   ];
 }
 const TABS = { in: 'NHẬP_HÀNG', out: 'XUẤT_HÀNG', check: 'KIỂM_KHO', process: 'CHẾ_BIẾN_SƠ_CHẾ', recon: 'ĐỐI_SOÁT_ĐƠN' };
+/* v46: tab nhật ký đăng nhập (ADMIN theo dõi) — mỗi lần đăng nhập (thành công / sai PIN /
+   bị chặn IP) là 1 dòng: Thời gian | Nhân viên | Vai trò | IP | Kết quả. Tự tạo nếu chưa có. */
+const LOGIN_LOG_TAB = 'LỊCH_SỬ_ĐĂNG_NHẬP';
+const LOGIN_LOG_HEADER = ['Thời gian', 'Nhân viên', 'Vai trò', 'IP', 'Kết quả'];
 const DEFAULT_EXPORT_CATEGORIES = ['Bán hàng', 'Chuyển kho', 'Trả nhà cung cấp', 'Hủy hàng hỏng', 'Khác'];
 const SUGGESTED_DOMAIN = 'kho.xelientinh247.com'; // tên miền gợi ý mặc định (ADMIN sửa được trong Cài đặt)
 const state = {
@@ -197,6 +207,7 @@ const state = {
   discrepancyStatus: {}, // trạng thái xử lí chênh lệch (APP_CAI_DAT: discrepancy_status): id -> {status, note, by, at}
   arrivalConfirmations: {}, // xác nhận nhận hàng (APP_CAI_DAT: arrival_confirmations): mã phiếu nhập -> {history: [{action:'confirm'|'unconfirm', by, at, note?, shortage?}]}
   settingsRows: {},     // APP_CAI_DAT: key -> số dòng
+  loginLogTabReady: false, // v46: tab LỊCH_SỬ_ĐĂNG_NHẬP đã tồn tại trên Sheet hay chưa
   ipLock: { enabled: false, allow: [] },
   defaultWarehouse: '', // Kho mặc định (APP_CAI_DAT: default_warehouse)
   customDomain: '',     // Tên miền riêng (APP_CAI_DAT: custom_domain)
@@ -981,7 +992,7 @@ function reconStatsFor(from, to) {
 }
 
 async function readAllTables(sheetId) {
-  const names = ['TỒN_KHO_POS', 'CẤU_HÌNH', TABS.in, TABS.out, TABS.check, TABS.process, TABS.recon, 'ĐƠN_POS_ẨN', 'APP_CAI_DAT'];
+  const names = ['TỒN_KHO_POS', 'CẤU_HÌNH', TABS.in, TABS.out, TABS.check, TABS.process, TABS.recon, 'ĐƠN_POS_ẨN', 'APP_CAI_DAT', LOGIN_LOG_TAB];
   const tables = {};
   if (WRITABLE) {
     const meta = await sheetsApi('GET', `/v4/spreadsheets/${sheetId}`);
@@ -990,6 +1001,16 @@ async function readAllTables(sheetId) {
       await sheetsApi('POST', `/v4/spreadsheets/${sheetId}:batchUpdate`, { requests: [{ addSheet: { properties: { title: 'APP_CAI_DAT' } } }] });
       await apiValuesAppend(sheetId, 'APP_CAI_DAT', [['Khóa', 'Giá trị']]);
       tables['APP_CAI_DAT'] = [['Khóa', 'Giá trị']];
+    }
+    // v46: tab nhật ký đăng nhập — tự tạo kèm header nếu chưa có (cùng mẫu APP_CAI_DAT ở trên)
+    state.loginLogTabReady = titles.includes(LOGIN_LOG_TAB);
+    if (!state.loginLogTabReady) {
+      try {
+        await sheetsApi('POST', `/v4/spreadsheets/${sheetId}:batchUpdate`, { requests: [{ addSheet: { properties: { title: LOGIN_LOG_TAB } } }] });
+        await apiValuesAppendRaw(sheetId, LOGIN_LOG_TAB, [LOGIN_LOG_HEADER]);
+        tables[LOGIN_LOG_TAB] = [LOGIN_LOG_HEADER];
+        state.loginLogTabReady = true;
+      } catch { /* tạo tab lỗi: ghi nhật ký sẽ thử tạo lại ở lần đăng nhập sau */ }
     }
     for (const n of names) {
       if (tables[n]) continue;
@@ -1218,6 +1239,45 @@ function noteLoginFail(ip) {
   e.count += 1;
   if (e.count >= LOGIN_MAX_FAILS) e.blockedUntil = Date.now() + LOGIN_BLOCK_MS;
   loginFails.set(ip, e);
+}
+
+/* ---- Nhật ký đăng nhập (v46) ----
+   Mỗi kết quả đăng nhập ghi 1 dòng vào tab LỊCH_SỬ_ĐĂNG_NHẬP để ADMIN theo dõi.
+   Việc ghi KHÔNG chặn kết quả đăng nhập: handler chỉ "thả" việc ghi chạy nền (xếp hàng
+   qua loginLogChain để các dòng không ghi chồng nhau), lỗi ghi Sheet bị nuốt hoàn toàn. */
+let loginLogChain = Promise.resolve();
+async function ensureLoginLogTab(sheetId) {
+  if (state.loginLogTabReady) return true;
+  const meta = await sheetsApi('GET', `/v4/spreadsheets/${sheetId}`);
+  const titles = (meta.sheets || []).map(s => s.properties.title);
+  if (!titles.includes(LOGIN_LOG_TAB)) {
+    await sheetsApi('POST', `/v4/spreadsheets/${sheetId}:batchUpdate`, { requests: [{ addSheet: { properties: { title: LOGIN_LOG_TAB } } }] });
+    await apiValuesAppendRaw(sheetId, LOGIN_LOG_TAB, [LOGIN_LOG_HEADER]);
+  }
+  state.loginLogTabReady = true;
+  return true;
+}
+function recordLoginLog(name, role, ip, result) {
+  if (!WRITABLE) return; // chế độ chỉ đọc: không có nơi ghi, bỏ qua lặng lẽ
+  const row = [nowFull(), name || '', role || '', ip || '', result];
+  loginLogChain = loginLogChain.then(async () => {
+    try {
+      const sheetId = currentSheetId();
+      await ensureLoginLogTab(sheetId);
+      await apiValuesAppendRaw(sheetId, LOGIN_LOG_TAB, [row]);
+    } catch (e) { console.error('Ghi lịch sử đăng nhập lỗi:', e.message); }
+  });
+}
+/* Đọc thô tab nhật ký (cho API ADMIN). Tab chưa có → mảng rỗng, không coi là lỗi. */
+async function readLoginLogRows() {
+  const sheetId = currentSheetId();
+  if (WRITABLE) {
+    const meta = await sheetsApi('GET', `/v4/spreadsheets/${sheetId}`);
+    const titles = (meta.sheets || []).map(s => s.properties.title);
+    if (!titles.includes(LOGIN_LOG_TAB)) return [];
+    return apiValuesGet(sheetId, LOGIN_LOG_TAB);
+  }
+  try { return await gvizRows(sheetId, LOGIN_LOG_TAB); } catch { return []; }
 }
 
 /* ---------------- Phiên đăng nhập + phân quyền ---------------- */
@@ -1492,13 +1552,14 @@ async function api(req, res, url) {
     if (loginBlocked(ip)) return send(res, 429, { error: 'Quá nhiều lần nhập sai PIN. Vui lòng thử lại sau ít phút.' });
     const { pin } = await readBody(req);
     const staff = state.staff.find(s => s.active && pinMatches(s.pin, pin));
-    if (!staff) { noteLoginFail(ip); return send(res, 401, { error: 'Mã PIN không đúng. Vui lòng thử lại.' }); }
+    if (!staff) { noteLoginFail(ip); recordLoginLog('', '', ip, 'Sai PIN'); return send(res, 401, { error: 'Mã PIN không đúng. Vui lòng thử lại.' }); }
     loginFails.delete(ip); // PIN đúng → xoá bộ đếm lần sai của IP này
     // Khoá mạng công ty (v43): chỉ áp cho NHÂN VIÊN — PIN đúng nhưng IP ngoài danh sách thì
     // KHÔNG tạo phiên, trả phản hồi chặn mạng công ty. ADMIN không bị áp dụng.
-    if (!isAdmin(staff) && ipLockActive() && !ipAllowed(ip, state.ipLock.allow)) return sendIpBlocked(res);
+    if (!isAdmin(staff) && ipLockActive() && !ipAllowed(ip, state.ipLock.allow)) { recordLoginLog(staff.name, staff.roleName, ip, 'Bị chặn IP'); return sendIpBlocked(res); }
     const token = crypto.randomBytes(24).toString('hex');
     sessions.set(token, staff.id);
+    recordLoginLog(staff.name, staff.roleName, ip, 'Thành công');
     return send(res, 200, { token, user: publicUser(staff) });
   }
   const user = auth(req);
@@ -1845,6 +1906,32 @@ async function api(req, res, url) {
     }
     items.sort((a, b) => b.timeKey.localeCompare(a.timeKey) || b.code.localeCompare(a.code));
     return send(res, 200, { period: per, items });
+  }
+
+  /* v46: lịch sử đăng nhập — đọc tab LỊCH_SỬ_ĐĂNG_NHẬP, mới nhất lên đầu, tối đa 500 dòng.
+     Lọc from/to (YYYY-MM-DD, gồm cả 2 đầu, theo ngày của bản ghi) + staff (đúng tên). */
+  if (p === '/api/admin/login-history' && method === 'GET') {
+    if (!needAdmin(req, res)) return;
+    const from = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get('from') || '') ? url.searchParams.get('from') : '';
+    const to = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get('to') || '') ? url.searchParams.get('to') : '';
+    const fStaff = url.searchParams.get('staff') || '';
+    let rows = [];
+    try { rows = await readLoginLogRows(); } catch { rows = []; }
+    const items = [];
+    for (const r of rows) {
+      let at = String((r || [])[0] || '').trim();
+      if (!at || at === LOGIN_LOG_HEADER[0]) continue; // bỏ dòng trống + dòng header
+      const conv = sheetsSerialToText(at); if (conv) at = conv; // phòng khi ô bị Sheets diễn giải thành serial
+      const date = parseDateKey(at);
+      if (!date) continue;
+      if (from && date < from) continue;
+      if (to && date > to) continue;
+      const name = String(r[1] || '');
+      if (fStaff && name !== fStaff) continue;
+      items.push({ at, name, role: String(r[2] || ''), ip: String(r[3] || ''), result: String(r[4] || '') });
+    }
+    items.sort((a, b) => b.at.localeCompare(a.at));
+    return send(res, 200, { items: items.slice(0, 500) });
   }
 
   if (p === '/api/admin/recon-check' && method === 'GET') {
