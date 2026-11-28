@@ -146,6 +146,7 @@ html[data-theme="dark"] .switch .track{background:#3a4a40}
 .modal-head{background:linear-gradient(135deg,#0b2239,#16324f);color:#fff;display:flex;align-items:center;justify-content:center;gap:8px;font-weight:700;letter-spacing:.6px;font-size:13.5px;padding:13px}
 .mh-dot{width:9px;height:9px;border-radius:50%;background:#ffc233;box-shadow:0 0 0 3px rgba(255,194,51,.25);flex:0 0 9px}
 .modal-body{padding:24px 22px 22px;text-align:center}
+.modal-logo{width:56px;height:56px;border-radius:16px;object-fit:cover;display:block;margin:0 auto 14px;box-shadow:var(--shadow)}
 .modal-icon{width:84px;height:84px;border-radius:50%;margin:2px auto 16px;display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:800}
 .modal-icon.warn{background:#fdf0e0;color:#f59e0b;box-shadow:0 0 0 7px rgba(245,158,11,.14)}
 .modal-icon.error{background:#fdecec;color:#e5484d;box-shadow:0 0 0 7px rgba(229,72,77,.13)}

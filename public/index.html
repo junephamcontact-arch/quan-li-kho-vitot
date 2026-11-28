@@ -8,7 +8,12 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%231d9e57'/><text x='50' y='66' font-size='52' text-anchor='middle' fill='white' font-family='Arial' font-weight='bold'>V</text></svg>">
+<link rel="icon" href="favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#1d9e57">
 </head>
 <body>
 
@@ -17,7 +22,7 @@
   <div class="card login-card">
     <img class="logo-img" src="vitot-logo.png" alt="Logo Vitot" style="width:64px;height:64px;border-radius:20px;margin:0 auto 12px">
     <h1 style="margin:0;font-size:21px">Quản lí kho Vitot</h1>
-    <div class="mut" style="margin-top:4px">Hệ thống nội bộ v44.281126</div>
+    <div class="mut" style="margin-top:4px">Hệ thống nội bộ v45.281126</div>
     <p class="mut" id="loginHint" style="margin:16px 0 0">Nhập mã PIN 4 số để đăng nhập</p>
     <div class="pin-dots" id="pinDots"><span></span><span></span><span></span><span></span></div>
     <div class="pinpad" id="pinPad"></div>
@@ -30,7 +35,7 @@
   <aside id="sidebar">
     <div class="brand">
       <img class="logo-img" src="vitot-logo.png" alt="Logo Vitot">
-      <div><h1>Quản lí kho Vitot</h1><div class="sub">Hệ thống nội bộ v44.281126</div></div>
+      <div><h1>Quản lí kho Vitot</h1><div class="sub">Hệ thống nội bộ v45.281126</div></div>
     </div>
     <nav id="nav"></nav>
     <div class="side-foot">
@@ -57,6 +62,7 @@
   <div class="modal">
     <div class="modal-head"><span class="mh-dot"></span>VITOT FOOD • THÔNG BÁO</div>
     <div class="modal-body">
+      <img class="modal-logo" src="vitot-logo.png" alt="Logo Vitot">
       <div class="modal-icon" id="modalIcon">!</div>
       <h3 id="modalTitle"></h3>
       <p id="modalMsg"></p>

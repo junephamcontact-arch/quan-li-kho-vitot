@@ -1,5 +1,5 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v44.281126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v45.281126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
