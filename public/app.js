@@ -1,5 +1,5 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v42.271126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v43.281126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -118,10 +118,15 @@ function buildPinPad() {
       if (pinBuf.length === 4) {
         try {
           const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin: pinBuf }) }).then(x => x.json());
-          if (!r.token) throw new Error(r.error || 'PIN không đúng');
+          if (!r.token) { const err = new Error(r.error || 'PIN không đúng'); err.ipBlocked = !!r.ipBlocked; throw err; }
           S.token = r.token; localStorage.setItem('qk-token', S.token); pinBuf = ''; renderPinDots();
           await enterApp();
-        } catch (e) { pinBuf = ''; renderPinDots(); await alertErr('Đăng nhập thất bại', e.message); }
+        } catch (e) {
+          pinBuf = ''; renderPinDots();
+          // Bị khoá mạng công ty (nhân viên ngoài mạng): hiện thông báo mạng công ty như trang chặn trước đây
+          if (e.ipBlocked) await alertWarn('Ứng dụng chỉ hoạt động trong mạng công ty', e.message);
+          else await alertErr('Đăng nhập thất bại', e.message);
+        }
       }
     };
     pad.appendChild(b);
@@ -1747,15 +1752,15 @@ VIEWS.settings = async () => {
       </div>
       <p class="mut" id="sSheetMeta">${S.boot.inventoryMeta.count ? `Đã đồng bộ ${S.boot.inventoryMeta.count} sản phẩm • ${esc(S.boot.inventoryMeta.syncedAt)}` : 'Chưa có dữ liệu tồn kho.'}</p>`);
     html += acc('🌐 Mạng công ty (tuỳ chọn)', `
-      <p class="mut">Khi bật, app chỉ mở được từ các IP công cộng trong danh sách dưới đây (ví dụ IP mạng tại công ty). Người ở ngoài mạng công ty sẽ thấy trang thông báo và không đăng nhập được. Mặc định: <b>tắt</b>.</p>
-      <label style="display:flex;gap:8px;align-items:center;font-weight:600;margin-bottom:12px"><input type="checkbox" id="sIpOn"> Chỉ cho phép dùng app trong mạng công ty</label>
+      <p class="mut">Khi bật, khoá mạng chỉ áp dụng cho <b>NHÂN VIÊN</b>: nhân viên chỉ mở được app từ các IP công cộng trong danh sách dưới đây (ví dụ IP mạng tại công ty) — ở ngoài các IP này, nhập đúng PIN vẫn bị chặn. Tài khoản <b>ADMIN không bị khoá</b>, mở được app từ mọi nơi. Mặc định: <b>tắt</b>.</p>
+      <label style="display:flex;gap:8px;align-items:center;font-weight:600;margin-bottom:12px"><input type="checkbox" id="sIpOn"> Chỉ cho phép nhân viên dùng app trong mạng công ty</label>
       <div class="field"><label class="f">IP hiện tại của bạn (máy chủ nhìn thấy)</label>
         <div style="display:flex;gap:8px"><div class="locked-in" style="flex:1"><span class="lk">🔒</span><input class="in" id="sIpMine" readonly placeholder="Đang lấy…"></div><button class="btn" id="sIpUseMine" type="button">Dùng IP hiện tại của tôi</button></div></div>
       <label class="f">Danh sách IP / dải CIDR được phép</label>
       <div id="sIpList"></div>
       <div style="display:flex;gap:8px;margin-top:8px"><input class="in" id="sIpNew" placeholder="Ví dụ 113.190.10.5 hoặc 113.190.10.0/24" style="flex:1"><button class="btn" id="sIpAdd" type="button">+ Thêm</button></div>
       <button class="btn primary" id="sIpSave" style="margin-top:12px">Lưu cài đặt mạng</button>
-      <p class="mut" style="margin-top:8px">Lưu ý: IP công cộng của công ty có thể thay đổi khi modem khởi động lại — nếu bị khoá ngoài, xem mục "lối thoát khẩn cấp" trong tài liệu triển khai (biến môi trường DISABLE_IP_LOCK=1).</p>`);
+      <p class="mut" style="margin-top:8px">Lưu ý: IP công cộng của công ty có thể thay đổi khi modem khởi động lại — nhân viên bị chặn thì ADMIN cứ đăng nhập từ mọi nơi để thêm IP mới vào danh sách. Trường hợp khẩn cấp vẫn còn "lối thoát" trong tài liệu triển khai (biến môi trường DISABLE_IP_LOCK=1).</p>`);
     html += acc('🌐 Kết nối tên miền', `
       <p class="mut">Khai báo tên miền riêng để nhân viên truy cập app qua tên miền của công ty. Tên miền <b>xelientinh247.com</b> đăng ký tại <b>TenTen</b>, nhưng DNS được quản lí tại <b>Cloudflare</b> (gói Free): TenTen chỉ còn là nơi đăng ký và trỏ nameserver — mọi bản ghi DNS sửa ở Cloudflare, không sửa ở TenTen. Mục này trong app chỉ <b>khai báo tên miền + kiểm tra trạng thái</b>; chứng chỉ HTTPS (ổ khoá xanh) do <b>Render</b> tự cấp sau khi DNS trỏ đúng.</p>
       <div class="field"><label class="f">Tên miền của app</label>
@@ -1946,7 +1951,7 @@ VIEWS.settings = async () => {
   };
   $('#sIpAdd').onclick = () => { const x = $('#sIpNew').value.trim(); if (!x) return alertWarn('Chưa nhập IP', 'Hãy nhập địa chỉ IP hoặc dải CIDR cần cho phép.'); if (!ipAllow.includes(x)) ipAllow.push(x); $('#sIpNew').value = ''; renderIpList(); };
   $('#sIpSave').onclick = async () => {
-    try { const r = await post('/api/ip-lock', { enabled: $('#sIpOn').checked, allow: ipAllow }); ipAllow = r.allow; renderIpList(); await alertOk('Đã lưu cài đặt mạng', r.enabled ? 'Đã BẬT: app chỉ dùng được trong mạng công ty (các IP trong danh sách).' : 'Đã TẮT: app dùng được từ mọi mạng.'); }
+    try { const r = await post('/api/ip-lock', { enabled: $('#sIpOn').checked, allow: ipAllow }); ipAllow = r.allow; renderIpList(); await alertOk('Đã lưu cài đặt mạng', r.enabled ? 'Đã BẬT: nhân viên chỉ dùng được app trong mạng công ty (các IP trong danh sách); ADMIN vẫn mở được từ mọi nơi.' : 'Đã TẮT: app dùng được từ mọi mạng.'); }
     catch (e) { alertErr('Không lưu được', e.message); }
   };
   /* Kết nối tên miền (DNS quản lí tại Cloudflare; đăng ký tại TenTen) */
