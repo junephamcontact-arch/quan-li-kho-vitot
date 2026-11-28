@@ -1,5 +1,5 @@
 'use strict';
-/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v45.281126 */
+/* Quản lí kho Vitot — frontend standalone (vanilla JS) — v46.281126 */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -141,7 +141,7 @@ const NAV = [
 /* Menu ADMIN (v33): thuần GIÁM SÁT — KHÔNG có Nhập hàng / Xuất hàng; Kiểm kho / Chế biến /
    Đối soát mở màn hình theo dõi (ADMIN_VIEWS) thay cho form làm việc của nhân viên kho. */
 const NAV_ADMIN = [
-  ['dashboard', '▦', 'Tổng quan'], ['activity', '👥', 'Hoạt động nhân viên'], ['goods', '📦', 'Hàng hoá & Tồn kho'],
+  ['dashboard', '▦', 'Tổng quan'], ['activity', '👥', 'Hoạt động nhân viên'], ['loginhistory', '🔐', 'Lịch sử đăng nhập'], ['goods', '📦', 'Hàng hoá & Tồn kho'],
   ['processing', '🔪', 'Chế biến / Sơ chế'], ['recon', '🧾', 'Đối soát đơn'], ['stocktake', '🧮', 'Kiểm kho'],
   ['staffsum', '📊', 'Tổng hợp nhân viên'], ['history', '🕘', 'Lịch sử phiếu'], ['inventory', '🔍', 'Tra cứu tồn kho'],
   ['calendar', '🗓️', 'Lịch'], ['settings', '⚙️', 'Cài đặt']
@@ -628,6 +628,30 @@ VIEWS.activity = async () => {
   }
   $('#actUser').onchange = load;
   $('#actType').onchange = load;
+  load();
+};
+
+/* ---------- Lịch sử đăng nhập (ADMIN, v46) ---------- */
+const LH_BADGE = { 'Thành công': 'g', 'Sai PIN': 'r', 'Bị chặn IP': 'y' };
+VIEWS.loginhistory = async () => {
+  const v = $('#view'); v.className = 'view';
+  v.innerHTML = `<div class="card"><div id="lhBar"></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
+      <div class="field" style="width:210px;margin-bottom:0"><label class="f">Nhân viên</label><select class="in" id="lhStaff"><option value="">Tất cả nhân viên</option>${(S.boot.staffNames || []).map(n => `<option>${esc(n)}</option>`).join('')}</select></div>
+    </div>
+    <div id="lhList">Đang tải…</div></div>`;
+  mountPeriodBar($('#lhBar'), load);
+  async function load() {
+    const box = $('#lhList'); if (!box || S.view !== 'loginhistory') return;
+    const { from, to } = monRange();
+    const q = new URLSearchParams({ from, to });
+    if ($('#lhStaff').value) q.set('staff', $('#lhStaff').value);
+    try {
+      const r = await api('/api/admin/login-history?' + q.toString());
+      box.innerHTML = r.items.length ? `<table class="tbl"><tr><th>Thời gian</th><th>Nhân viên</th><th>Vai trò</th><th>IP</th><th>Kết quả</th></tr>${r.items.map(i => `<tr><td style="white-space:nowrap">${esc(i.at)}</td><td>${i.name ? `<b>${esc(i.name)}</b>` : '<span class="mut">—</span>'}</td><td>${esc(i.role) || '<span class="mut">—</span>'}</td><td style="white-space:nowrap">${esc(i.ip)}</td><td><span class="badge ${LH_BADGE[i.result] || 'y'}">${esc(i.result)}</span></td></tr>`).join('')}</table>` : '<p class="mut">Chưa có lần đăng nhập nào trong kỳ.</p>';
+    } catch (e) { box.innerHTML = `<p>${esc(e.message)}</p>`; }
+  }
+  $('#lhStaff').onchange = load;
   load();
 };
 
